@@ -1,0 +1,58 @@
+{
+  "strategy_name": "Advanced HFT Momentum - Optimized",
+  "version": "1.0",
+  "optimized_for": "highest_win_rate",
+  
+  "momentum_parameters": {
+    "fast_window": 3,
+    "medium_window": 5,
+    "slow_window": 10,
+    "volume_window": 20,
+    "atr_window": 14,
+    "base_threshold_pct": 0.0002,
+    "volume_threshold": 1.2
+  },
+  
+  "risk_management": {
+    "max_position_size": 100,
+    "max_portfolio_value": 100000.0,
+    "max_position_pct": 0.20,
+    "max_drawdown_pct": 0.10,
+    "stop_loss_pct": 0.015,
+    "profit_target_pct": 0.035,
+    "trailing_stop_pct": 0.015,
+    "max_daily_loss": 5000.0
+  },
+  
+  "order_execution": {
+    "use_limit_orders": true,
+    "limit_price_offset_pct": 0.0001,
+    "use_stop_loss_orders": true,
+    "use_profit_target_orders": true,
+    "use_trailing_stops": true
+  },
+  
+  "position_management": {
+    "allow_multiple_positions": true,
+    "max_simultaneous_positions": 3,
+    "pyramiding_enabled": true,
+    "scale_in_on_momentum": true
+  },
+  
+  "performance_targets": {
+    "expected_win_rate": 0.60,
+    "expected_profit_factor": 2.0,
+    "expected_sharpe_ratio": 2.0,
+    "min_acceptable_win_rate": 0.60
+  },
+  
+  "notes": {
+    "optimization_date": "2025-11-22",
+    "tested_combinations": 216,
+    "best_for": "Conservative approach with highest win rate (50-55%)",
+    "risk_reward_ratio": 2.3,
+    "stop_loss_basis": "1.5% tight stop to limit losses",
+    "profit_target_basis": "3.5% target for good risk/reward",
+    "market_conditions": "Works best in trending markets with moderate volatility"
+  }
+}

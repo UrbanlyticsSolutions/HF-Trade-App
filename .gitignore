@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# Data
+market_data.db
+*.csv
+data/
+catboost_info/
+
+# Models
+models/*.pkl
+models/*.json
+
+# Output
+output/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+.spec-workflow/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Options
+options_collection_state.json
