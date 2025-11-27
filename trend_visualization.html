@@ -257,448 +257,328 @@
             </div>
             <div class="chart-wrapper">
                 <canvas id="priceChart"></canvas>
-                const response = await fetch(`${API_URL}/historical_data?days=${days}`);
-                if (!response.ok) throw new Error('API request failed');
+            </div>
+        </div>
+    </div>
 
-                const data = await response.json();
-                chartData = data.data;
-                console.log(`Loaded ${data.bars} bars for ${data.timeframe}`);
+    <script>
+        const DATA_URL = './live_data.json';
+
+        if (typeof Chart !== 'undefined' && typeof chartjsPluginZoom !== 'undefined') {
+            Chart.register(chartjsPluginZoom);
+        }
+        let priceChart;
+        let chartData = [];
+        let currentTimeframe = 1; // Used for day ranges
+        let chartMode = 'minutes';
+        let recentMinutes = 30;
+        const MAX_RECENT_BARS = 100;
+
+        // Update API status
+        function updateStatus(connected, message) {
+            const statusEl = document.getElementById('apiStatus');
+            const textEl = document.getElementById('statusText');
+
+            statusEl.className = 'status ' + (connected ? 'connected' : 'error');
+            textEl.textContent = message;
+        }
+
+        function updateLastTimestamp(ts) {
+            const subtext = document.getElementById('lastUpdated');
+            if (!ts) {
+                subtext.textContent = 'No data received yet';
+                return;
+            }
+            const dt = new Date(ts);
+            const localeString = dt.toLocaleString(undefined, {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            subtext.textContent = `Last bar: ${dt.toLocaleDateString()} ${localeString}`;
+        }
+
+        // Change timeframe
+        function changeTimeframe(period, button) {
+            // Update button states
+            document.querySelectorAll('.timeframe-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            if (button) {
+                button.classList.add('active');
+            }
+
+            resetZoom();
+
+            if (period === '30m') {
+                chartMode = 'minutes';
+                recentMinutes = 30;
+                fetchData();
+            } else {
+                // For now, historical data is not synced to static file
+                alert("Historical data > 30m is not available in this live view.");
+            }
+        }
+
+        // Fetch data from static JSON
+        async function fetchData() {
+            try {
+                // Add timestamp to prevent caching
+                const response = await fetch(`${DATA_URL}?t=${new Date().getTime()}`);
+                if (!response.ok) throw new Error('Data file not found');
+
+                const fullData = await response.json();
+
+                // Update Prediction
+                updateStatus(true, `✅ Connected - Live Data`);
+                updatePredictionUI(fullData.prediction);
+
+                // Update Chart
+                const data = fullData.chart_data;
+                chartData = data.data.slice(-MAX_RECENT_BARS);
                 updateChart();
                 updateLastTimestamp(chartData.length ? chartData[chartData.length - 1].timestamp : null);
-                updateStatus(true, `✅ Connected - Showing ${data.timeframe} (${data.bars} bars)`);
-                } catch (error) {
-                console.error('Error fetching historical data:', error);
-                }
-                }
 
-                // Update prediction UI
-                function updatePredictionUI(data) {
-                // Direction
-                const direction = data.prediction.direction;
-                const confidence = data.prediction.confidence;
-                let color;
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                updateStatus(false, '❌ Waiting for data update...');
+            }
+        }
 
-                if (direction === 'UP') color = 'var(--accent-green)';
-                else if (direction === 'DOWN') color = 'var(--accent-red)';
-                else color = 'var(--text-secondary)';
+        function getTimeframeLabel() {
+            if (chartMode === 'minutes') {
+                return `last ${recentMinutes} minutes`;
+            }
+            return `${currentTimeframe}D history`;
+        }
 
-                document.getElementById('nextPrediction').textContent = direction;
-                document.getElementById('nextPrediction').style.color = color;
-                document.getElementById('predictionProb').textContent = `Confidence: ${confidence.toFixed(1)}%`;
+        // Update prediction UI
+        function updatePredictionUI(data) {
+            // Direction
+            const direction = data.prediction.direction;
+            const confidence = data.prediction.confidence;
+            let color;
 
-                // Trend
-                const trend = data.trend.direction;
-                const trendColor = trend === 'BULLISH' ? 'var(--accent-green)' : 'var(--accent-red)';
+            if (direction === 'UP') color = 'var(--accent-green)';
+            else if (direction === 'DOWN') color = 'var(--accent-red)';
+            else color = 'var(--text-secondary)';
 
-                document.getElementById('currentTrend').textContent = trend;
-                document.getElementById('currentTrend').style.color = trendColor;
-                document.getElementById('trendStrength').textContent = `${data.trend.strength} (ADX:
-                ${data.trend.adx.toFixed(1)})`;
-                document.getElementById('trendStrength').className = trend === 'BULLISH' ? 'metric-change positive' :
-                'metric-change negative';
+            document.getElementById('nextPrediction').textContent = direction;
+            document.getElementById('nextPrediction').style.color = color;
+            document.getElementById('predictionProb').textContent = `Confidence: ${confidence.toFixed(1)}%`;
 
-                // Target
-                const currentPrice = data.current_price;
-                const targetPrice = data.target_price;
-                const priceDiff = targetPrice - currentPrice;
-                const percentChange = (priceDiff / currentPrice) * 100;
+            // Trend
+            const trend = data.trend.direction;
+            const trendColor = trend === 'BULLISH' ? 'var(--accent-green)' : 'var(--accent-red)';
 
-                document.getElementById('priceTarget').textContent = `$${targetPrice.toFixed(2)}`;
-                document.getElementById('targetChange').textContent = `${priceDiff >= 0 ? '+' :
-                ''}$${priceDiff.toFixed(2)} (${percentChange >= 0 ? '+' : ''}${percentChange.toFixed(2)}%)`;
-                document.getElementById('targetChange').className = priceDiff >= 0 ? 'metric-change positive' :
-                'metric-change negative';
+            document.getElementById('currentTrend').textContent = trend;
+            document.getElementById('currentTrend').style.color = trendColor;
+            document.getElementById('trendStrength').textContent = `${data.trend.strength} (ADX: ${data.trend.adx.toFixed(1)})`;
+            document.getElementById('trendStrength').className = trend === 'BULLISH' ? 'metric-change positive' : 'metric-change negative';
 
-                // Confidence
-                document.getElementById('modelAccuracy').textContent = `${confidence.toFixed(1)}%`;
-                }
+            // Target
+            const currentPrice = data.current_price;
+            const targetPrice = data.target_price;
+            const priceDiff = targetPrice - currentPrice;
+            const percentChange = (priceDiff / currentPrice) * 100;
 
-                // Initialize chart
-                function initChart() {
-                const ctx = document.getElementById('priceChart').getContext('2d');
+            document.getElementById('priceTarget').textContent = `$${targetPrice.toFixed(2)}`;
+            document.getElementById('targetChange').textContent = `${priceDiff >= 0 ? '+' : ''}$${priceDiff.toFixed(2)} (${percentChange >= 0 ? '+' : ''}${percentChange.toFixed(2)}%)`;
+            document.getElementById('targetChange').className = priceDiff >= 0 ? 'metric-change positive' : 'metric-change negative';
 
-                priceChart = new Chart(ctx, {
+            // Confidence
+            document.getElementById('modelAccuracy').textContent = `${confidence.toFixed(1)}%`;
+        }
+
+        // Initialize chart
+        function initChart() {
+            const ctx = document.getElementById('priceChart').getContext('2d');
+
+            priceChart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                datasets: [
-                {
-                label: 'Price',
-                data: [],
-                borderColor: '#3b82f6',
-                backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.4,
-                pointRadius: 0
-                },
-                {
-                label: 'MA20',
-                data: [],
-                borderColor: '#10b981',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.4,
-                pointRadius: 0
-                },
-                {
-                label: 'MA50',
-                data: [],
-                borderColor: '#f59e0b',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.4,
-                pointRadius: 0
-                },
-                {
-                label: 'ML Predictions',
-                data: [],
-                borderColor: '#8b5cf6',
-                backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                borderWidth: 3,
-                borderDash: [8, 4],
-                fill: true,
-                tension: 0.4,
-                pointRadius: 1,
-                pointBackgroundColor: '#8b5cf6'
-                }
-                ]
-                },
-                options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: {
-                legend: {
-                display: true,
-                position: 'top',
-                labels: {
-                color: '#94a3b8',
-                usePointStyle: true,
-                padding: 15
-                }
-                },
-                tooltip: {
-                backgroundColor: 'rgba(15, 23, 42, 0.9)',
-                titleColor: '#f8fafc',
-                bodyColor: '#cbd5e1',
-                padding: 12,
-                callbacks: {
-                label: function (context) {
-                return context.dataset.label + ': $' + context.parsed.y.toFixed(2);
-                }
-                }
-                },
-                zoom: {
-                limits: {
-                x: { minRange: 5 * 60 * 1000 } // at least 5 minutes
-                },
-                pan: {
-                enabled: true,
-                mode: 'x',
-                modifierKey: 'shift'
-                },
-                zoom: {
-                wheel: {
-                enabled: true,
-                modifierKey: 'ctrl'
-                },
-                pinch: {
-                enabled: true
-                },
-                drag: {
-                enabled: true,
-                backgroundColor: 'rgba(59, 130, 246, 0.15)'
-                },
-                mode: 'x'
-                }
-                }
-                },
-                scales: {
-                x: {
-                type: 'time',
-                time: {
-                unit: 'hour',
-                displayFormats: {
-                hour: 'MMM dd HH:mm',
-                day: 'MMM dd'
-                }
-                },
-                grid: { color: 'rgba(148, 163, 184, 0.1)' },
-                ticks: { color: '#94a3b8', maxRotation: 45, minRotation: 0 }
-                },
-                y: {
-                grid: { color: 'rgba(148, 163, 184, 0.1)' },
-                ticks: {
-                color: '#94a3b8',
-                callback: value => '$' + value.toFixed(2)
-                }
-                }
-                }
-                }
-                });
-                }
-
-                // Update chart with data
-                function updateChart() {
-                if (!chartData || chartData.length === 0) return;
-
-                priceChart.data.datasets[0].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.close || d.price
-                }));
-                priceChart.data.datasets[1].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.ma20 }));
-                priceChart.data.datasets[2].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.ma50 || d.ma20
-                }));
-                priceChart.data.datasets[3].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.prediction }));
-
-                // Adjust time unit based on timeframe
-                if (chartMode === 'minutes') {
-                priceChart.options.scales.x.time.unit = 'minute';
-                } else if (currentTimeframe > 5) {
-                priceChart.options.scales.x.time.unit = 'day';
-                } else if (currentTimeframe > 1) {
-                priceChart.options.scales.x.time.unit = 'hour';
-                } else {
-                priceChart.options.scales.x.time.unit = 'hour';
-                }
-
-                enforceRecentWindow();
-                priceChart.update('none');
-                }
-
-                function enforceRecentWindow() {
-                if (!priceChart || chartData.length === 0) return;
-                const lastPoint = chartData[chartData.length - 1];
-                if (!lastPoint || !lastPoint.timestamp) return;
-                const lastTs = new Date(lastPoint.timestamp).getTime();
-
-                let windowMs;
-                if (chartMode === 'minutes') {
-                windowMs = recentMinutes * 60 * 1000;
-                } else {
-                windowMs = currentTimeframe * 24 * 60 * 60 * 1000;
-                }
-
-                const minIdx = Math.max(0, chartData.length - MAX_RECENT_BARS);
-                const fallbackStart = new Date(chartData[minIdx].timestamp).getTime();
-                const minTs = chartMode === 'minutes' ? Math.max(lastTs - windowMs, fallbackStart) : fallbackStart;
-
-                priceChart.options.scales.x.min = minTs;
-                priceChart.options.scales.x.max = lastTs;
-                }
-
-                function resetZoom() {
-                document.getElementById('currentTrend').style.color = trendColor;
-                document.getElementById('trendStrength').textContent = `${data.trend.strength} (ADX:
-                ${data.trend.adx.toFixed(1)})`;
-                document.getElementById('trendStrength').className = trend === 'BULLISH' ? 'metric-change positive' :
-                'metric-change negative';
-
-                // Target
-                const currentPrice = data.current_price;
-                const targetPrice = data.target_price;
-                const priceDiff = targetPrice - currentPrice;
-                const percentChange = (priceDiff / currentPrice) * 100;
-
-                document.getElementById('priceTarget').textContent = `$${targetPrice.toFixed(2)}`;
-                document.getElementById('targetChange').textContent = `${priceDiff >= 0 ? '+' :
-                ''}$${priceDiff.toFixed(2)} (${percentChange >= 0 ? '+' : ''}${percentChange.toFixed(2)}%)`;
-                document.getElementById('targetChange').className = priceDiff >= 0 ? 'metric-change positive' :
-                'metric-change negative';
-
-                // Confidence
-                document.getElementById('modelAccuracy').textContent = `${confidence.toFixed(1)}%`;
-                }
-
-                // Initialize chart
-                function initChart() {
-                const ctx = document.getElementById('priceChart').getContext('2d');
-
-                priceChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                datasets: [
-                {
-                label: 'Price',
-                data: [],
-                borderColor: '#3b82f6',
-                backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.4,
-                pointRadius: 0
-                },
-                {
-                label: 'MA20',
-                data: [],
-                borderColor: '#10b981',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.4,
-                pointRadius: 0
-                },
-                {
-                label: 'MA50',
-                data: [],
-                borderColor: '#f59e0b',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.4,
-                pointRadius: 0
-                },
-                {
-                label: 'ML Predictions',
-                data: [],
-                borderColor: '#8b5cf6',
-                backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                borderWidth: 3,
-                borderDash: [8, 4],
-                fill: true,
-                tension: 0.4,
-                pointRadius: 1,
-                pointBackgroundColor: '#8b5cf6'
-                }
-                ]
+                    datasets: [
+                        {
+                            label: 'Price',
+                            data: [],
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'MA20',
+                            data: [],
+                            borderColor: '#10b981',
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.4,
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'MA50',
+                            data: [],
+                            borderColor: '#f59e0b',
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.4,
+                            pointRadius: 0
+                        },
+                        {
+                            label: 'ML Predictions',
+                            data: [],
+                            borderColor: '#8b5cf6',
+                            backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                            borderWidth: 3,
+                            borderDash: [8, 4],
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 1,
+                            pointBackgroundColor: '#8b5cf6'
+                        }
+                    ]
                 },
                 options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: {
-                legend: {
-                display: true,
-                position: 'top',
-                labels: {
-                color: '#94a3b8',
-                usePointStyle: true,
-                padding: 15
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: '#94a3b8',
+                                usePointStyle: true,
+                                padding: 15
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                            titleColor: '#f8fafc',
+                            bodyColor: '#cbd5e1',
+                            padding: 12,
+                            callbacks: {
+                                label: function (context) {
+                                    return context.dataset.label + ': $' + context.parsed.y.toFixed(2);
+                                }
+                            }
+                        },
+                        zoom: {
+                            limits: {
+                                x: { minRange: 5 * 60 * 1000 } // at least 5 minutes
+                            },
+                            pan: {
+                                enabled: true,
+                                mode: 'x',
+                                modifierKey: 'shift'
+                            },
+                            zoom: {
+                                wheel: {
+                                    enabled: true,
+                                    modifierKey: 'ctrl'
+                                },
+                                pinch: {
+                                    enabled: true
+                                },
+                                drag: {
+                                    enabled: true,
+                                    backgroundColor: 'rgba(59, 130, 246, 0.15)'
+                                },
+                                mode: 'x'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'hour',
+                                displayFormats: {
+                                    hour: 'MMM dd HH:mm',
+                                    day: 'MMM dd'
+                                }
+                            },
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' },
+                            ticks: { color: '#94a3b8', maxRotation: 45, minRotation: 0 }
+                        },
+                        y: {
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' },
+                            ticks: {
+                                color: '#94a3b8',
+                                callback: value => '$' + value.toFixed(2)
+                            }
+                        }
+                    }
                 }
-                },
-                tooltip: {
-                backgroundColor: 'rgba(15, 23, 42, 0.9)',
-                titleColor: '#f8fafc',
-                bodyColor: '#cbd5e1',
-                padding: 12,
-                callbacks: {
-                label: function (context) {
-                return context.dataset.label + ': $' + context.parsed.y.toFixed(2);
-                }
-                }
-                },
-                zoom: {
-                limits: {
-                x: { minRange: 5 * 60 * 1000 } // at least 5 minutes
-                },
-                pan: {
-                enabled: true,
-                mode: 'x',
-                modifierKey: 'shift'
-                },
-                zoom: {
-                wheel: {
-                enabled: true,
-                modifierKey: 'ctrl'
-                },
-                pinch: {
-                enabled: true
-                },
-                drag: {
-                enabled: true,
-                backgroundColor: 'rgba(59, 130, 246, 0.15)'
-                },
-                mode: 'x'
-                }
-                }
-                },
-                scales: {
-                x: {
-                type: 'time',
-                time: {
-                unit: 'hour',
-                displayFormats: {
-                hour: 'MMM dd HH:mm',
-                day: 'MMM dd'
-                }
-                },
-                grid: { color: 'rgba(148, 163, 184, 0.1)' },
-                ticks: { color: '#94a3b8', maxRotation: 45, minRotation: 0 }
-                },
-                y: {
-                grid: { color: 'rgba(148, 163, 184, 0.1)' },
-                ticks: {
-                color: '#94a3b8',
-                callback: value => '$' + value.toFixed(2)
-                }
-                }
-                }
-                }
-                });
-                }
+            });
+        }
 
-                // Update chart with data
-                function updateChart() {
-                if (!chartData || chartData.length === 0) return;
+        // Update chart with data
+        function updateChart() {
+            if (!chartData || chartData.length === 0) return;
 
-                priceChart.data.datasets[0].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.close || d.price
-                }));
-                priceChart.data.datasets[1].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.ma20 }));
-                priceChart.data.datasets[2].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.ma50 || d.ma20
-                }));
-                priceChart.data.datasets[3].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.prediction }));
+            priceChart.data.datasets[0].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.close || d.price }));
+            priceChart.data.datasets[1].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.ma20 }));
+            priceChart.data.datasets[2].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.ma50 || d.ma20 }));
+            priceChart.data.datasets[3].data = chartData.map(d => ({ x: new Date(d.timestamp), y: d.prediction }));
 
-                // Adjust time unit based on timeframe
-                if (chartMode === 'minutes') {
+            // Adjust time unit based on timeframe
+            if (chartMode === 'minutes') {
                 priceChart.options.scales.x.time.unit = 'minute';
-                } else if (currentTimeframe > 5) {
+            } else if (currentTimeframe > 5) {
                 priceChart.options.scales.x.time.unit = 'day';
-                } else if (currentTimeframe > 1) {
+            } else if (currentTimeframe > 1) {
                 priceChart.options.scales.x.time.unit = 'hour';
-                } else {
+            } else {
                 priceChart.options.scales.x.time.unit = 'hour';
-                }
+            }
 
-                enforceRecentWindow();
-                priceChart.update('none');
-                }
+            enforceRecentWindow();
+            priceChart.update('none');
+        }
 
-                function enforceRecentWindow() {
-                if (!priceChart || chartData.length === 0) return;
-                const lastPoint = chartData[chartData.length - 1];
-                if (!lastPoint || !lastPoint.timestamp) return;
-                const lastTs = new Date(lastPoint.timestamp).getTime();
+        function enforceRecentWindow() {
+            if (!priceChart || chartData.length === 0) return;
+            const lastPoint = chartData[chartData.length - 1];
+            if (!lastPoint || !lastPoint.timestamp) return;
+            const lastTs = new Date(lastPoint.timestamp).getTime();
 
-                let windowMs;
-                if (chartMode === 'minutes') {
+            let windowMs;
+            if (chartMode === 'minutes') {
                 windowMs = recentMinutes * 60 * 1000;
-                } else {
+            } else {
                 windowMs = currentTimeframe * 24 * 60 * 60 * 1000;
-                }
+            }
 
-                const minIdx = Math.max(0, chartData.length - MAX_RECENT_BARS);
-                const fallbackStart = new Date(chartData[minIdx].timestamp).getTime();
-                const minTs = chartMode === 'minutes' ? Math.max(lastTs - windowMs, fallbackStart) : fallbackStart;
+            const minIdx = Math.max(0, chartData.length - MAX_RECENT_BARS);
+            const fallbackStart = new Date(chartData[minIdx].timestamp).getTime();
+            const minTs = chartMode === 'minutes' ? Math.max(lastTs - windowMs, fallbackStart) : fallbackStart;
 
-                priceChart.options.scales.x.min = minTs;
-                priceChart.options.scales.x.max = lastTs;
-                }
+            priceChart.options.scales.x.min = minTs;
+            priceChart.options.scales.x.max = lastTs;
+        }
 
-                function resetZoom() {
-                if (priceChart) {
+        function resetZoom() {
+            if (priceChart) {
                 priceChart.resetZoom();
-                }
-                }
+            }
+        }
 
-                // Initialize
-                window.addEventListener('load', async () => {
-                initChart();
+        // Initialize
+        window.addEventListener('load', async () => {
+            initChart();
 
-                // Initial fetch
+            // Initial fetch
+            await fetchData();
+
+            // Update every 30 seconds (matching the git push interval)
+            setInterval(async () => {
                 await fetchData();
-
-                // Update every 30 seconds (matching the git push interval)
-                setInterval(async () => {
-                await fetchData();
-                }, 30000);
-                });
-                </script>
+            }, 30000);
+        });
+    </script>
 </body>
 
 </html>
