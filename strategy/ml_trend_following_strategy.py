@@ -8,6 +8,7 @@ from datetime import datetime
 import logging
 import pandas as pd
 
+from core.features import build_feature_frame
 from strategy.risk_manager import RiskLimits
 from price_prediction_model import PricePredictionModel
 
@@ -183,37 +184,28 @@ class MLTrendFollowingStrategy:
         return macd_line[-1], signal_line[-1], hist[-1]
 
     def get_price_prediction_features(self):
-        """Extract features for Price Prediction Model"""
-        if len(self.prices) < 20:
+        """Extract features for Price Prediction Model."""
+        if len(self.prices) < 20 or len(self.timestamps) < 20:
             return None
-            
-        price = self.prices[-1]
-        
-        # Calculate basic features needed for the model
-        # Note: This is a simplified extraction matching the model's expectations
-        features = {
-            'price_change_1': (price - list(self.prices)[-2]) if len(self.prices) >= 2 else 0,
-            'price_change_3': (price - list(self.prices)[-4]) if len(self.prices) >= 4 else 0,
-            'price_change_5': (price - list(self.prices)[-6]) if len(self.prices) >= 6 else 0,
-            'price_volatility': np.std(list(self.prices)[-10:]) if len(self.prices) >= 10 else 0,
-            'ma_5': self.calculate_ma(5) or price,
-            'ma_10': self.calculate_ma(10) or price,
-            'ma_20': self.calculate_ma(20) or price,
-            'price_to_ma5': price / (self.calculate_ma(5) or price),
-            'price_to_ma20': price / (self.calculate_ma(20) or price),
-            'rsi': self.calculate_rsi(),
-            'macd': self.calculate_macd()[0],
-            'macd_hist': self.calculate_macd()[2],
-            'volume_ratio': self.volumes[-1] / np.mean(list(self.volumes)[-20:]) if len(self.volumes) >= 20 else 1.0,
-            'volume_change': (self.volumes[-1] - list(self.volumes)[-2]) if len(self.volumes) >= 2 else 0,
-            'adx': self.calculate_adx(),
-            'trend_strength': abs(self.calculate_ma(5) - self.calculate_ma(20)) if self.calculate_ma(20) else 0,
-            'hour': self.current_time.hour if self.current_time else 12,
-            'minute': self.current_time.minute if self.current_time else 0
-        }
-        
-        # Convert to list as expected by the model
-        return [features.get(k, 0) for k in self.price_predictor.feature_names]
+
+        data = pd.DataFrame({
+            "timestamp": list(self.timestamps),
+            "open": list(self.prices),  # Approximate open with last trade when missing
+            "high": list(self.highs),
+            "low": list(self.lows),
+            "close": list(self.prices),
+            "volume": list(self.volumes),
+        })
+
+        feature_df = build_feature_frame(data, dropna=True)
+        if feature_df.empty:
+            return None
+
+        latest_row = feature_df.iloc[-1].to_dict()
+        latest_row.setdefault("hour", self.current_time.hour if self.current_time else 12)
+        latest_row.setdefault("minute", self.current_time.minute if self.current_time else 0)
+
+        return self.price_predictor.extract_features(latest_row)
     
     def should_enter(self, trend_direction):
         """

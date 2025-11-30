@@ -12,6 +12,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import StandardScaler
 
+from core.features import FEATURE_COLUMNS, extract_feature_vector
+
 try:
     from catboost import CatBoostClassifier
     CATBOOST_AVAILABLE = True
@@ -34,29 +36,7 @@ class PricePredictionModel:
         self.model_type = model_type
         self.model = None
         self.scaler = StandardScaler()
-        
-        # Features for prediction
-        self.feature_names = [
-            # Price features
-            'price_change_1', 'price_change_3', 'price_change_5',
-            'price_volatility',
-            
-            # Moving averages
-            'ma_5', 'ma_10', 'ma_20',
-            'price_to_ma5', 'price_to_ma20',
-            
-            # Momentum
-            'rsi', 'macd', 'macd_hist',
-            
-            # Volume
-            'volume_ratio', 'volume_change',
-            
-            # Trend
-            'adx', 'trend_strength',
-            
-            # Time
-            'hour', 'minute'
-        ]
+        self.feature_names = FEATURE_COLUMNS.copy()
         
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
@@ -87,28 +67,7 @@ class PricePredictionModel:
     
     def extract_features(self, data_row):
         """Extract features from a data point"""
-        features = {
-            'price_change_1': data_row.get('price_change_1', 0),
-            'price_change_3': data_row.get('price_change_3', 0),
-            'price_change_5': data_row.get('price_change_5', 0),
-            'price_volatility': data_row.get('price_volatility', 0),
-            'ma_5': data_row.get('ma_5', 0),
-            'ma_10': data_row.get('ma_10', 0),
-            'ma_20': data_row.get('ma_20', 0),
-            'price_to_ma5': data_row.get('price_to_ma5', 1.0),
-            'price_to_ma20': data_row.get('price_to_ma20', 1.0),
-            'rsi': data_row.get('rsi', 50),
-            'macd': data_row.get('macd', 0),
-            'macd_hist': data_row.get('macd_hist', 0),
-            'volume_ratio': data_row.get('volume_ratio', 1.0),
-            'volume_change': data_row.get('volume_change', 0),
-            'adx': data_row.get('adx', 0),
-            'trend_strength': data_row.get('trend_strength', 0),
-            'hour': data_row.get('hour', 12),
-            'minute': data_row.get('minute', 0)
-        }
-        
-        return [features[k] for k in self.feature_names]
+        return extract_feature_vector(data_row, self.feature_names)
     
     def prepare_training_data(self, data_file):
         """Prepare training data from CSV"""

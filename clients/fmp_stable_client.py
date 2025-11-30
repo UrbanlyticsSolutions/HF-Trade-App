@@ -390,29 +390,47 @@ class FMPStableClient:
             params["to"] = to_date
         return self._get("historical-price-eod/dividend-adjusted", params)
 
-    def historical_chart_1min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+    def historical_chart_1min(self, symbol: str, from_date: str, to_date: str, extended: bool = True) -> List[Dict]:
         """1-minute intraday data (PREMIUM)"""
-        return self._get("historical-chart/1min", {"symbol": symbol, "from": from_date, "to": to_date})
+        params = {"symbol": symbol, "from": from_date, "to": to_date}
+        if extended:
+            params["extended"] = "true"
+        return self._get("historical-chart/1min", params)
 
-    def historical_chart_5min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+    def historical_chart_5min(self, symbol: str, from_date: str, to_date: str, extended: bool = True) -> List[Dict]:
         """5-minute intervals (PREMIUM)"""
-        return self._get("historical-chart/5min", {"symbol": symbol, "from": from_date, "to": to_date})
+        params = {"symbol": symbol, "from": from_date, "to": to_date}
+        if extended:
+            params["extended"] = "true"
+        return self._get("historical-chart/5min", params)
 
-    def historical_chart_15min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+    def historical_chart_15min(self, symbol: str, from_date: str, to_date: str, extended: bool = True) -> List[Dict]:
         """15-minute intervals (PREMIUM)"""
-        return self._get("historical-chart/15min", {"symbol": symbol, "from": from_date, "to": to_date})
+        params = {"symbol": symbol, "from": from_date, "to": to_date}
+        if extended:
+            params["extended"] = "true"
+        return self._get("historical-chart/15min", params)
 
-    def historical_chart_30min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+    def historical_chart_30min(self, symbol: str, from_date: str, to_date: str, extended: bool = True) -> List[Dict]:
         """30-minute intervals (PREMIUM)"""
-        return self._get("historical-chart/30min", {"symbol": symbol, "from": from_date, "to": to_date})
+        params = {"symbol": symbol, "from": from_date, "to": to_date}
+        if extended:
+            params["extended"] = "true"
+        return self._get("historical-chart/30min", params)
 
-    def historical_chart_1hour(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+    def historical_chart_1hour(self, symbol: str, from_date: str, to_date: str, extended: bool = True) -> List[Dict]:
         """Hourly price data (PREMIUM)"""
-        return self._get("historical-chart/1hour", {"symbol": symbol, "from": from_date, "to": to_date})
+        params = {"symbol": symbol, "from": from_date, "to": to_date}
+        if extended:
+            params["extended"] = "true"
+        return self._get("historical-chart/1hour", params)
 
-    def historical_chart_4hour(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+    def historical_chart_4hour(self, symbol: str, from_date: str, to_date: str, extended: bool = True) -> List[Dict]:
         """4-hour intervals (PREMIUM)"""
-        return self._get("historical-chart/4hour", {"symbol": symbol, "from": from_date, "to": to_date})
+        params = {"symbol": symbol, "from": from_date, "to": to_date}
+        if extended:
+            params["extended"] = "true"
+        return self._get("historical-chart/4hour", params)
 
     # ==================== 7. ECONOMICS (4 endpoints) ====================
 

@@ -257,6 +257,97 @@
             </div>
             <div class="chart-wrapper">
                 <canvas id="priceChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const DATA_URL = './live_data.json';
+
+        if (typeof Chart !== 'undefined' && typeof chartjsPluginZoom !== 'undefined') {
+            Chart.register(chartjsPluginZoom);
+        }
+        let priceChart;
+        let chartData = [];
+        let currentTimeframe = 1; // Used for day ranges
+        let chartMode = 'minutes';
+        let recentMinutes = 30;
+        const MAX_RECENT_BARS = 100;
+
+        // Update API status
+        function updateStatus(connected, message) {
+            const statusEl = document.getElementById('apiStatus');
+            const textEl = document.getElementById('statusText');
+
+            statusEl.className = 'status ' + (connected ? 'connected' : 'error');
+            textEl.textContent = message;
+        }
+
+        function updateLastTimestamp(ts) {
+            const subtext = document.getElementById('lastUpdated');
+            if (!ts) {
+                subtext.textContent = 'No data received yet';
+                return;
+            }
+            const dt = new Date(ts);
+            const localeString = dt.toLocaleString(undefined, {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            subtext.textContent = `Last bar: ${dt.toLocaleDateString()} ${localeString}`;
+        }
+
+        // Change timeframe
+        function changeTimeframe(period, button) {
+            // Update button states
+            document.querySelectorAll('.timeframe-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            if (button) {
+                button.classList.add('active');
+            }
+
+            resetZoom();
+
+            if (period === '30m') {
+                chartMode = 'minutes';
+                recentMinutes = 30;
+                fetchData();
+            } else {
+                // For now, historical data is not synced to static file
+                alert("Historical data > 30m is not available in this live view.");
+            }
+        }
+
+        // Fetch data from static JSON
+        async function fetchData() {
+            try {
+                // Add timestamp to prevent caching
+                const response = await fetch(`${DATA_URL}?t=${new Date().getTime()}`);
+                if (!response.ok) throw new Error('Data file not found');
+
+                const fullData = await response.json();
+
+                // Update Prediction
+                updateStatus(true, `✅ Connected - Live Data`);
+                updatePredictionUI(fullData.prediction);
+
+                // Update Chart
+                const data = fullData.chart_data;
+                chartData = data.data.slice(-MAX_RECENT_BARS);
+                updateChart();
+                updateLastTimestamp(chartData.length ? chartData[chartData.length - 1].timestamp : null);
+
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                updateStatus(false, '❌ Waiting for data update...');
+            }
+        }
+
+        function getTimeframeLabel() {
+            if (chartMode === 'minutes') {
+                return `last ${recentMinutes} minutes`;
             }
             return `${currentTimeframe}D history`;
         }

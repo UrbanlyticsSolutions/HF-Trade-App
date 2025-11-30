@@ -111,7 +111,22 @@ class MarketDatabase:
             )
         ''')
 
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_realtime_ticker ON realtime_quotes(ticker, quote_timestamp)')
+        self.conn.commit()
+
+        # Table for historical predictions
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS historical_predictions (
+                timestamp TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                prediction REAL,
+                direction TEXT,
+                confidence REAL,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (timestamp, ticker)
+            )
+        ''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pred_ticker_ts ON historical_predictions(ticker, timestamp)')
 
         self.conn.commit()
 
@@ -612,3 +627,36 @@ class MarketDatabase:
             quote_timestamp
         ))
         self.conn.commit()
+
+    def insert_prediction(self, ticker: str, timestamp: str, prediction: float, direction: str, confidence: float):
+        """Insert a historical prediction"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO historical_predictions 
+            (timestamp, ticker, prediction, direction, confidence)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (timestamp, ticker.upper(), prediction, direction, confidence))
+        self.conn.commit()
+
+    def get_predictions(self, ticker: str, limit: int = 100):
+        """Get historical predictions"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT timestamp, prediction, direction, confidence, generated_at
+            FROM historical_predictions
+            WHERE ticker = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        ''', (ticker.upper(), limit))
+        
+        rows = cursor.fetchall()
+        results = []
+        for row in rows:
+            results.append({
+                'timestamp': row[0],
+                'prediction': row[1],
+                'direction': row[2],
+                'confidence': row[3],
+                'generated_at': row[4]
+            })
+        return results

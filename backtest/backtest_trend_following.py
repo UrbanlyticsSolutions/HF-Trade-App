@@ -1,12 +1,15 @@
 """
 Backtest Intraday ML Trend-Following Strategy
 """
+import os
 import sqlite3
+import sys
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import json
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from strategy.ml_trend_following_strategy import MLTrendFollowingStrategy
 from strategy.risk_manager import RiskLimits
 

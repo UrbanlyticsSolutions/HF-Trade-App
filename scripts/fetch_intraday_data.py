@@ -24,6 +24,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS intraday_ticker_data (
         timestamp TEXT,
         ticker TEXT,
+        date TEXT,
         open REAL,
         high REAL,
         low REAL,
@@ -67,9 +68,12 @@ def fetch_and_store_data(symbol="QQQ", days=5):
         # Prepare for insertion
         records = []
         for row in data:
+            ts = row['date']
+            date_part = ts.split(' ')[0]
             records.append((
-                row['date'], # timestamp
+                ts,          # timestamp
                 symbol,      # ticker
+                date_part,   # date
                 row['open'],
                 row['high'],
                 row['low'],
@@ -83,8 +87,8 @@ def fetch_and_store_data(symbol="QQQ", days=5):
         
         cursor.executemany('''
         INSERT OR REPLACE INTO intraday_ticker_data 
-        (timestamp, ticker, open, high, low, close, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (timestamp, ticker, date, open, high, low, close, volume)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', records)
         
         conn.commit()
