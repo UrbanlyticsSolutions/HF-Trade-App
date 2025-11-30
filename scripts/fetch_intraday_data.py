@@ -1,76 +1,99 @@
+"""
+Fetch Intraday Data
+Fetches 5-minute intraday data from FMP and stores it in the local SQLite database.
+"""
 import os
-import logging
-import argparse
-from datetime import datetime, timedelta
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sqlite3
+import pandas as pd
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from clients.fmp_stable_client import FMPStableClient
-from clients.database import MarketDatabase
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('FetchIntraday')
+def init_db():
+    """Initialize the database table if it doesn't exist"""
+    conn = sqlite3.connect('market_data.db')
+    cursor = conn.cursor()
+    
+    # Create table matching prediction_api.py expectations
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS intraday_ticker_data (
+        timestamp TEXT,
+        ticker TEXT,
+        open REAL,
+        high REAL,
+        low REAL,
+        close REAL,
+        volume INTEGER,
+        PRIMARY KEY (timestamp, ticker)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print("Database initialized.")
 
-def fetch_data(days=60):
-    """Fetch intraday data for the last N days"""
+def fetch_and_store_data(symbol="QQQ", days=5):
+    """Fetch data and store in DB"""
     load_dotenv()
-    api_key = os.getenv('FMP_API_KEY')
+    api_key = os.getenv("FMP_API_KEY")
     
     if not api_key:
-        logger.error("FMP_API_KEY not found in environment variables")
+        print("Error: FMP_API_KEY not found.")
         return
 
-    client = FMPStableClient(api_key)
-    db = MarketDatabase()
+    client = FMPStableClient(api_key=api_key)
     
-    symbol = "QQQ"
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+    # Calculate date range
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     
-    logger.info(f"Fetching {days} days of 1min intraday data for {symbol}...")
-    logger.info(f"Period: {start_date.date()} to {end_date.date()}")
+    print(f"Fetching 5min data for {symbol} from {start_date} to {end_date}...")
     
-    # Fetch data
-    # Note: FMP historical-chart/1min usually returns limited data per call, 
-    # but the client might handle date ranges or we might need to loop.
-    # Let's try fetching in chunks of 5 days to be safe and avoid timeouts/limits
-    
-    current_start = start_date
-    total_records = 0
-    
-    # Loop must include the ending day so we do not stop one day early
-    while current_start <= end_date:
-        current_end = min(current_start + timedelta(days=5), end_date)
+    try:
+        # Fetch 5min data
+        data = client.historical_chart_5min(symbol, from_date=start_date, to_date=end_date)
         
-        s_str = current_start.strftime('%Y-%m-%d')
-        e_str = current_end.strftime('%Y-%m-%d')
-        
-        logger.info(f"Fetching chunk: {s_str} to {e_str}")
-        
-        try:
-            data = client.historical_chart_1min(symbol, s_str, e_str)
-            
-            if data:
-                logger.info(f"Received {len(data)} records")
-                db.insert_intraday_data(symbol, data)
-                total_records += len(data)
-            else:
-                logger.warning(f"No data received for {s_str} to {e_str}")
-                
-        except Exception as e:
-            logger.error(f"Error fetching chunk: {e}")
-            
-        current_start = current_end + timedelta(days=1) # Move to next day
-        
-    logger.info(f"Total records inserted: {total_records}")
+        if not data:
+            print("No data returned from API.")
+            return
 
-def main():
-    parser = argparse.ArgumentParser(description="Backfill 1-minute intraday data")
-    parser.add_argument("--days", type=int, default=180, help="Number of trailing days to fetch")
-    args = parser.parse_args()
-    fetch_data(days=args.days)
-
+        print(f"Retrieved {len(data)} records.")
+        
+        # Prepare for insertion
+        records = []
+        for row in data:
+            records.append((
+                row['date'], # timestamp
+                symbol,      # ticker
+                row['open'],
+                row['high'],
+                row['low'],
+                row['close'],
+                row['volume']
+            ))
+            
+        # Insert into DB
+        conn = sqlite3.connect('market_data.db')
+        cursor = conn.cursor()
+        
+        cursor.executemany('''
+        INSERT OR REPLACE INTO intraday_ticker_data 
+        (timestamp, ticker, open, high, low, close, volume)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', records)
+        
+        conn.commit()
+        conn.close()
+        print(f"Successfully stored {len(records)} records in market_data.db")
+        
+    except Exception as e:
+        print(f"Error fetching/storing data: {e}")
 
 if __name__ == "__main__":
-    main()
+    init_db()
+    fetch_and_store_data()

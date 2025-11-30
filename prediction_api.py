@@ -15,8 +15,10 @@ import numpy as np
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from price_prediction_model import PricePredictionModel
+from core.market_analyzer import MarketAnalyzer
+from core.features import build_feature_frame
 from clients.fmp_stable_client import FMPStableClient
+from clients.database import MarketDatabase
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,34 +26,8 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend access
 
-# Initialize model
-model = PricePredictionModel(model_path="models/price_predictor.pkl")
-last_model_load_time = 0
-
-def check_and_reload_model():
-    """Check if model file has changed and reload if necessary"""
-    global last_model_load_time
-    try:
-        if os.path.exists(model.model_path):
-            mtime = os.path.getmtime(model.model_path)
-            if last_model_load_time == 0:
-                last_model_load_time = mtime
-            
-            if mtime > last_model_load_time:
-                print(f"🔄 Model file changed, reloading... (New mtime: {mtime})")
-                model.load_model()
-                last_model_load_time = mtime
-                print("✅ Model reloaded successfully")
-    except Exception as e:
-        print(f"⚠️ Error checking model reload: {e}")
-
-try:
-    model.load_model()
-    if os.path.exists(model.model_path):
-        last_model_load_time = os.path.getmtime(model.model_path)
-    print("✅ Model loaded successfully")
-except Exception as e:
-    print(f"⚠️  Model not found, will need training: {e}")
+# Initialize Analyzer
+analyzer = MarketAnalyzer(model_path="models/price_predictor.pkl")
 
 # Initialize FMP client for real-time data
 api_key = os.getenv("FMP_API_KEY")
@@ -71,52 +47,11 @@ def safe_float(value, fallback):
         return float(fallback)
 
 
-def calculate_indicators(df):
-    """Calculate technical indicators for the dataframe"""
-    # Price changes
-    df['price_change_1'] = df['close'].pct_change(1)
-    df['price_change_3'] = df['close'].pct_change(3)
-    df['price_change_5'] = df['close'].pct_change(5)
-    df['price_volatility'] = df['close'].rolling(window=20).std()
-    
-    # Moving averages
-    df['ma_5'] = df['close'].rolling(window=5).mean()
-    df['ma_10'] = df['close'].rolling(window=10).mean()
-    df['ma_20'] = df['close'].rolling(window=20).mean()
-    df['price_to_ma5'] = df['close'] / df['ma_5']
-    df['price_to_ma20'] = df['close'] / df['ma_20']
-    
-    # RSI
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    # MACD
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    
-    # Volume
-    df['volume_ratio'] = df['volume'] / df['volume'].rolling(window=20).mean()
-    df['volume_change'] = df['volume'].pct_change(1)
-    
-    # ADX (simplified)
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['adx'] = tr.rolling(window=14).mean() / df['close'] * 100
-    df['trend_strength'] = df['adx']
-    
-    # Time features
-    df['hour'] = pd.to_datetime(df['timestamp']).dt.hour
-    df['minute'] = pd.to_datetime(df['timestamp']).dt.minute
-    
-    return df
+def format_timestamp(value):
+    """Return a consistent string timestamp for JSON payloads."""
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+    return str(value)
 
 
 def get_latest_data_from_db(limit=100):
@@ -137,7 +72,6 @@ def get_latest_data_from_db(limit=100):
             return None
 
         df = df.sort_values('timestamp').reset_index(drop=True)
-        # Note: Indicators are calculated later in get_prediction after merging live quote
         return df
     except Exception as e:
         print(f"Error reading from database: {e}")
@@ -148,9 +82,6 @@ def get_latest_data_from_db(limit=100):
 def get_prediction():
     """Get current prediction"""
     try:
-        # Check for model updates
-        check_and_reload_model()
-        
         # Get latest data from DB
         df = get_latest_data_from_db(limit=100)
         
@@ -198,65 +129,16 @@ def get_prediction():
         if len(df) < 50:
             return jsonify({'error': 'Insufficient data'}), 500
             
-        # Calculate indicators
-        df = calculate_indicators(df)
+        # Use MarketAnalyzer
+        result = analyzer.analyze(df)
         
-        # Get latest row
-        latest = df.iloc[-1]
-        
-        # Extract features
-        features = model.extract_features(latest.to_dict())
-        
-        # Make prediction
-        prediction_class = model.predict(features)
-        probabilities = model.predict_proba(features)
-        
-        # Map prediction to direction
-        direction_map = {0: 'DOWN', 1: 'NEUTRAL', 2: 'UP'}
-        direction = direction_map.get(prediction_class, 'NEUTRAL')
-        confidence = float(max(probabilities) * 100)
-        
-        # Calculate trend
-        ma20 = safe_float(latest.get('ma_20', latest['close']), latest['close'])
-        ma50_raw = df['close'].rolling(window=50).mean().iloc[-1] if len(df) >= 50 else latest['close']
-        ma50 = safe_float(ma50_raw, latest['close'])
-        trend = 'BULLISH' if ma20 > ma50 else 'BEARISH'
-        adx_value = safe_float(latest.get('adx', 0), 0)
-        
-        # Price target (simple: current + predicted direction)
-        current_price = float(latest['close'])
-        if direction == 'UP':
-            target_price = current_price * 1.002  # +0.2%
-        elif direction == 'DOWN':
-            target_price = current_price * 0.998  # -0.2%
+        if result:
+            # Format timestamp for JSON
+            result['timestamp'] = format_timestamp(result['timestamp'])
+            return jsonify(result)
         else:
-            target_price = current_price
-        
-        return jsonify({
-            'timestamp': latest['timestamp'],
-            'current_price': current_price,
-            'prediction': {
-                'direction': direction,
-                'confidence': confidence,
-                'probabilities': {
-                    'down': float(probabilities[0] * 100),
-                    'neutral': float(probabilities[1] * 100),
-                    'up': float(probabilities[2] * 100)
-                }
-            },
-            'trend': {
-                'direction': trend,
-                'adx': adx_value,
-                'strength': 'Strong' if adx_value > 25 else 'Moderate' if adx_value > 15 else 'Weak'
-            },
-            'target_price': target_price,
-            'indicators': {
-                'rsi': safe_float(latest.get('rsi', 50), 50),
-                'macd': safe_float(latest.get('macd', 0), 0),
-                'ma_20': ma20,
-                'ma_50': ma50
-            }
-        })
+            return jsonify({'error': 'Analysis failed'}), 500
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -275,35 +157,73 @@ def get_chart_data():
         if df is None:
             return jsonify({'error': 'No data available'}), 500
         
-        # Prepare chart data
-        chart_data = []
-        for idx, row in df.iterrows():
-            # Make prediction for each point
-            try:
-                features = model.extract_features(row.to_dict())
-                pred_class = model.predict(features)
-                
-                # Estimate predicted price
-                if pred_class == 2:  # UP
-                    pred_price = row['close'] * 1.002
-                elif pred_class == 0:  # DOWN
-                    pred_price = row['close'] * 0.998
-                else:  # NEUTRAL
-                    pred_price = row['close']
-            except:
-                pred_price = row['close']
-            
-            ma20 = safe_float(row.get('ma_20', row['close']), row['close'])
-            rsi = safe_float(row.get('rsi', 50), 50)
-            adx = safe_float(row.get('adx', 0), 0)
+        df = build_feature_frame(df, dropna=False)
 
-            chart_data.append({
-                'timestamp': row['timestamp'],
+        # Prepare chart data
+        
+        # 1. Fetch stored predictions from DB
+        db = MarketDatabase()
+        stored_preds = db.get_predictions(SYMBOL, limit=len(df) + 10) # Fetch a bit more to be safe
+        db.close()
+        
+        # Create map: timestamp -> prediction
+        pred_map = {format_timestamp(p['timestamp']): p['prediction'] for p in stored_preds}
+
+        # 2. Calculate fallback predictions (for old data not in DB)
+        calculated_predictions = []
+        for idx, row in df.iterrows():
+            try:
+                features = analyzer.model.extract_features(row.to_dict())
+                pred_class = analyzer.model.predict(features)
+                if pred_class == 2: pred = row['close'] * 1.002
+                elif pred_class == 0: pred = row['close'] * 0.998
+                else: pred = row['close']
+                calculated_predictions.append(pred)
+            except:
+                calculated_predictions.append(row['close'])
+
+        # 3. Build final chart list
+        chart_data = []
+        for i in range(len(df)):
+            row = df.iloc[i]
+            ts = pd.to_datetime(row['timestamp'])
+            
+            item = {
+                'timestamp': format_timestamp(row['timestamp']),
                 'price': safe_float(row['close'], row['close']),
-                'ma20': ma20,
-                'prediction': safe_float(pred_price, row['close']),
-                'rsi': rsi,
-                'adx': adx
+                'ma20': safe_float(row.get('ma_20', row['close']), row['close']),
+                'rsi': safe_float(row.get('rsi', 50), 50),
+                'adx': safe_float(row.get('adx', 0), 0),
+                'prediction': None 
+            }
+            
+            # If we have a prediction from the PREVIOUS bar (i-1), that applies to THIS bar (i)
+            if i > 0:
+                prev_ts = df.iloc[i-1]['timestamp']
+                # Check DB first
+                prev_ts_key = format_timestamp(prev_ts)
+                if prev_ts_key in pred_map:
+                    item['prediction'] = pred_map[prev_ts_key]
+                else:
+                    # Fallback to calculated
+                    item['prediction'] = calculated_predictions[i-1]
+            
+            chart_data.append(item)
+
+        # 3. Add the FINAL prediction (for T+1)
+        if len(df) > 0:
+            last_row = df.iloc[-1]
+            last_ts = pd.to_datetime(last_row['timestamp'])
+            future_ts = last_ts + timedelta(minutes=1)
+            future_pred = calculated_predictions[-1]
+            
+            chart_data.append({
+                'timestamp': future_ts.strftime('%Y-%m-%d %H:%M:%S'),
+                'price': None, # Future, no price yet
+                'ma20': None,
+                'rsi': None,
+                'adx': None,
+                'prediction': future_pred
             })
         
         return jsonify({'data': chart_data})
@@ -338,7 +258,7 @@ def get_historical_data():
             }).dropna()
             df_resampled = df_resampled.reset_index()
             df_resampled['timestamp'] = df_resampled['timestamp'].astype(str)
-            df = calculate_indicators(df_resampled)
+            df = build_feature_frame(df_resampled, dropna=True)
         
         ma50_series = df['close'].rolling(window=50).mean().fillna(df['close'])
 
@@ -347,8 +267,8 @@ def get_historical_data():
         for idx, row in df.iterrows():
             # Make prediction for each point
             try:
-                features = model.extract_features(row.to_dict())
-                pred_class = model.predict(features)
+                features = analyzer.model.extract_features(row.to_dict())
+                pred_class = analyzer.model.predict(features)
                 
                 # Estimate predicted price
                 if pred_class == 2:  # UP
@@ -367,7 +287,7 @@ def get_historical_data():
             adx = safe_float(row.get('adx', 0), 0)
 
             historical_data.append({
-                'timestamp': row['timestamp'],
+                'timestamp': format_timestamp(row['timestamp']),
                 'open': safe_float(row['open'], row['close']),
                 'high': safe_float(row['high'], row['close']),
                 'low': safe_float(row['low'], row['close']),
@@ -395,18 +315,18 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'ok',
-        'model_loaded': model.model is not None,
+        'model_loaded': analyzer.model.model is not None,
         'symbol': SYMBOL
     })
 
 
 if __name__ == '__main__':
     print(f"🚀 Starting Real-Time Prediction API for {SYMBOL}")
-    print(f"📊 Model: {model.model_path}")
+    print(f"📊 Model: {analyzer.model.model_path}")
     print(f"🌐 API will be available at http://localhost:5000")
     print(f"\nEndpoints:")
     print(f"  - GET /api/prediction - Get current prediction")
     print(f"  - GET /api/chart_data - Get chart data")
     print(f"  - GET /api/health - Health check")
     
-    app.run(debug=False, port=5000, host='0.0.0.0')
+    app.run(debug=False, port=5001, host='0.0.0.0')
