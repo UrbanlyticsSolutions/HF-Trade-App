@@ -963,12 +963,22 @@ def restart_engine(n_clicks):
     """Restart the trading engine."""
     if n_clicks:
         try:
-            # Write restart signal file
-            restart_file = Path(__file__).parent / "logs" / "restart_signal.txt"
-            restart_file.parent.mkdir(exist_ok=True)
-            with open(restart_file, 'w') as f:
-                f.write(f"RESTART {datetime.now().isoformat()}")
-            return html.Span("Restart signal sent!", style={'color': '#00ff88'})
+            # Try systemd restart for VM deployment
+            result = subprocess.run(
+                ["sudo", "systemctl", "restart", "trading-engine"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return html.Span("Engine restarted!", style={'color': '#00ff88'})
+            else:
+                # Fallback: write restart signal file for local use
+                restart_file = Path(__file__).parent / "logs" / "restart_signal.txt"
+                restart_file.parent.mkdir(exist_ok=True)
+                with open(restart_file, 'w') as f:
+                    f.write(f"RESTART {datetime.now().isoformat()}")
+                return html.Span("Restart signal sent!", style={'color': '#ffa500'})
         except Exception as e:
             return html.Span(f"Error: {str(e)}", style={'color': '#ff4757'})
     return ""

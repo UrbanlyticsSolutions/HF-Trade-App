@@ -50,12 +50,18 @@ class TradingState:
     total_pnl: float = 0.0
     max_drawdown: float = 0.0
     
+    # Equity curve for charts
+    equity_curve: List[Dict] = field(default_factory=list)
+    
     # Daily history
     daily_records: List[Dict] = field(default_factory=list)
     
     # Last update
     last_updated: str = ""
     last_trade_date: str = ""
+    
+    # Engine status
+    engine_status: str = "unknown"
     
     # Strategy-specific state
     strategy_state: Dict = field(default_factory=dict)
@@ -241,9 +247,11 @@ class StatePersistence:
                     total_losses=data.get('total_losses', 0),
                     total_pnl=data.get('total_pnl', 0),
                     max_drawdown=data.get('max_drawdown', 0),
+                    equity_curve=data.get('equity_curve', []),
                     daily_records=data.get('daily_records', []),
                     last_updated=data.get('last_updated', ''),
                     last_trade_date=data.get('last_trade_date', ''),
+                    engine_status=data.get('engine_status', 'unknown'),
                     strategy_state=data.get('strategy_state', {})
                 )
                 
@@ -278,13 +286,15 @@ class StatePersistence:
             self.state.high_water_mark = capital
             self.save_state()
     
-    def record_trade(self, pnl: float, is_win: bool):
+    def record_trade(self, pnl: float, is_win: bool, trade_id: int = None, option_type: str = None):
         """
         Record a completed trade.
         
         Args:
             pnl: Trade P&L in dollars
             is_win: Whether trade was profitable
+            trade_id: Optional trade ID for equity curve
+            option_type: Optional option type (PUT/CALL) for equity curve
         """
         self.state.total_trades += 1
         self.state.total_pnl += pnl
@@ -303,6 +313,22 @@ class StatePersistence:
         drawdown = (self.state.high_water_mark - self.state.current_capital) / self.state.high_water_mark
         if drawdown > self.state.max_drawdown:
             self.state.max_drawdown = drawdown
+        
+        # Update equity curve
+        if trade_id is not None:
+            # Initialize equity curve if empty
+            if not self.state.equity_curve:
+                self.state.equity_curve = [
+                    {"trade_id": 0, "type": "-", "equity": self.state.initial_capital, "pnl": 0}
+                ]
+            
+            self.state.equity_curve.append({
+                "trade_id": trade_id,
+                "type": (option_type or "").upper(),
+                "equity": self.state.current_capital,
+                "pnl": pnl,
+                "time": datetime.now().isoformat()
+            })
         
         self.state.last_trade_date = datetime.now().strftime("%Y-%m-%d")
         self.save_state()
