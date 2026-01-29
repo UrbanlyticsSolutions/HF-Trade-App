@@ -1,0 +1,7 @@
+requests>=2.31.0
+pandas
+numpy
+python-dotenv
+pytz
+httpx>=0.25.0
+supabase>=2.0.0

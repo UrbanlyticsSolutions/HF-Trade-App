@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Dashboard - User Setup</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        
+        h1 {
+            color: #38bdf8;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        
+        p {
+            color: #94a3b8;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #e2e8f0;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        input {
+            width: 100%;
+            padding: 12px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            color: #e2e8f0;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #38bdf8;
+        }
+        
+        button {
+            width: 100%;
+            padding: 14px;
+            background: #38bdf8;
+            color: #0f172a;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        
+        button:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .result {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            display: none;
+        }
+        
+        .result.success {
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid #22c55e;
+            color: #22c55e;
+        }
+        
+        .result.error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid #ef4444;
+            color: #ef4444;
+        }
+        
+        .result.info {
+            background: rgba(56, 189, 248, 0.1);
+            border: 1px solid #38bdf8;
+            color: #38bdf8;
+        }
+        
+        .code {
+            background: #0f172a;
+            padding: 12px;
+            border-radius: 4px;
+            margin-top: 12px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            overflow-x: auto;
+        }
+        
+        .note {
+            background: rgba(56, 189, 248, 0.1);
+            border-left: 3px solid #38bdf8;
+            padding: 12px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Trading Dashboard Setup</h1>
+        <p>This tool will create the authorized user account for your trading dashboard. You only need to run this once.</p>
+        
+        <form id="setupForm">
+            <div class="form-group">
+                <label for="projectId">Supabase Project ID</label>
+                <input 
+                    type="text" 
+                    id="projectId" 
+                    placeholder="e.g., abcdefghijklmnop"
+                    required
+                >
+            </div>
+            
+            <button type="submit" id="submitBtn">Create User Account</button>
+        </form>
+        
+        <div id="result" class="result"></div>
+        
+        <div class="note">
+            <strong>Authorized User:</strong><br>
+            Email: realericzhu@gmail<br>
+            Password: 1234<br><br>
+            After setup, use these credentials to log in to the dashboard.
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('setupForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const resultDiv = document.getElementById('result');
+        const projectIdInput = document.getElementById('projectId');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const projectId = projectIdInput.value.trim();
+            
+            if (!projectId) {
+                showResult('error', 'Please enter your Supabase Project ID');
+                return;
+            }
+            
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Creating user...';
+            showResult('info', 'Sending request to create user account...');
+            
+            try {
+                const url = `https://${projectId}.supabase.co/functions/v1/make-server-c1a53bfc/setup-user`;
+                
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    if (data.message.includes('already exists')) {
+                        showResult('info', `User already exists! You can now log in with:<br><br>Email: realericzhu@gmail<br>Password: 1234`);
+                    } else {
+                        showResult('success', `✓ Success! User created successfully.<br><br>You can now log in with:<br><br>Email: ${data.email}<br>Password: 1234<br><br><div class="code">User ID: ${data.userId}</div>`);
+                    }
+                } else {
+                    showResult('error', `Error: ${data.error || 'Unknown error occurred'}`);
+                }
+            } catch (error) {
+                showResult('error', `Network error: ${error.message}<br><br>Please check:<br>1. Your project ID is correct<br>2. Your Supabase project is running<br>3. The Edge Function is deployed`);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Create User Account';
+            }
+        });
+        
+        function showResult(type, message) {
+            resultDiv.className = `result ${type}`;
+            resultDiv.innerHTML = message;
+            resultDiv.style.display = 'block';
+        }
+    </script>
+</body>
+</html>

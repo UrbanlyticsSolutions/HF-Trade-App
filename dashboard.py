@@ -1,0 +1,956 @@
+"""
+Trading Dashboard - Real-time P&L visualization with Plotly Dash
+
+Usage:
+    python dashboard.py
+    python dashboard.py --port 8050
+"""
+import json
+import sqlite3
+import os
+from datetime import datetime, date
+from pathlib import Path
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from dash import Dash, html, dcc, dash_table, callback, Output, Input, State, no_update, ctx
+from dash.exceptions import PreventUpdate
+from plotly.subplots import make_subplots
+import subprocess
+import signal
+
+# Process tracking for restart functionality
+ENGINE_PROCESS = None
+
+
+# ============================================================
+# SYSTEM STATUS
+# ============================================================
+
+def get_system_status():
+    """Get system status information."""
+    status = {
+        "token_status": "Unknown",
+        "token_expires": None,
+        "token_age_minutes": None,
+        "engine_status": "Unknown",
+        "db_status": "Unknown",
+        "last_quote_time": None,
+        "errors": []
+    }
+    
+    # Check token file
+    token_path = Path(__file__).parent / "clients" / ".questrade_token.json"
+    if token_path.exists():
+        try:
+            with open(token_path) as f:
+                token_data = json.load(f)
+            
+            expires_at = token_data.get("expires_at", 0)
+            now = datetime.now().timestamp()
+            
+            if expires_at > now:
+                remaining_seconds = expires_at - now
+                remaining_minutes = remaining_seconds / 60
+                status["token_status"] = "Valid"
+                status["token_expires"] = datetime.fromtimestamp(expires_at).strftime("%H:%M:%S")
+                status["token_age_minutes"] = round(remaining_minutes, 1)
+            else:
+                status["token_status"] = "Expired"
+                status["errors"].append("Token has expired - needs refresh")
+        except Exception as e:
+            status["token_status"] = "Error"
+            status["errors"].append(f"Token file error: {str(e)}")
+    else:
+        status["token_status"] = "Missing"
+        status["errors"].append("No token file found")
+    
+    # Check database
+    db_path = Path(__file__).parent / "data" / "live_0dte_trades.db"
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM trades")
+            count = cursor.fetchone()[0]
+            status["db_status"] = f"OK ({count} trades)"
+            
+            # Get last trade time
+            cursor.execute("SELECT MAX(entry_time) FROM trades")
+            last_trade = cursor.fetchone()[0]
+            if last_trade:
+                status["last_trade_time"] = last_trade[:19]
+            
+            conn.close()
+        except Exception as e:
+            status["db_status"] = "Error"
+            status["errors"].append(f"Database error: {str(e)}")
+    else:
+        status["db_status"] = "No database"
+    
+    # Check log file for engine status
+    log_file = Path(__file__).parent / "logs" / f"live_0dte_{date.today().strftime('%Y%m%d')}.log"
+    if log_file.exists():
+        try:
+            # Read last few lines of log
+            with open(log_file, 'r') as f:
+                lines = f.readlines()
+            
+            if lines:
+                last_lines = lines[-20:]  # Last 20 lines
+                last_log_time = None
+                
+                for line in reversed(last_lines):
+                    if line.strip():
+                        # Parse timestamp from log line
+                        try:
+                            timestamp_str = line[:23]
+                            last_log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S,%f")
+                            break
+                        except:
+                            continue
+                
+                if last_log_time:
+                    age_seconds = (datetime.now() - last_log_time).total_seconds()
+                    status["last_quote_time"] = last_log_time.strftime("%H:%M:%S")
+                    
+                    if age_seconds < 60:
+                        status["engine_status"] = "Running"
+                    elif age_seconds < 300:
+                        status["engine_status"] = "Slow"
+                        status["errors"].append(f"No activity for {int(age_seconds)}s")
+                    else:
+                        status["engine_status"] = "Stale"
+                        status["errors"].append(f"No activity for {int(age_seconds/60)}min")
+                
+                # Check for recent errors in logs
+                for line in last_lines:
+                    if 'ERROR' in line or 'Exception' in line:
+                        status["errors"].append(line.strip()[:100])
+        except Exception as e:
+            pass
+    else:
+        status["engine_status"] = "No logs"
+    
+    return status
+
+
+def get_recent_logs(num_lines=50):
+    """Get recent log entries from terminal output file."""
+    # Primary: Read from terminal_output.log (live backend output)
+    terminal_log = Path(__file__).parent / "logs" / "terminal_output.log"
+    # Fallback: Trading log file
+    trading_log = Path(__file__).parent / "logs" / f"live_0dte_{date.today().strftime('%Y%m%d')}.log"
+    
+    lines_out = []
+    
+    # Try terminal output first (this has live backend output)
+    if terminal_log.exists():
+        try:
+            with open(terminal_log, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            for line in lines[-num_lines:]:
+                line = line.strip()
+                if line and len(line) > 150:
+                    line = line[:150] + '...'
+                if line:
+                    lines_out.append(line)
+        except:
+            pass
+    
+    # If no terminal output, fall back to trading log
+    if not lines_out and trading_log.exists():
+        try:
+            with open(trading_log, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            for line in lines[-num_lines:]:
+                line = line.strip()
+                if line and len(line) > 150:
+                    line = line[:150] + '...'
+                if line:
+                    lines_out.append(line)
+        except:
+            pass
+    
+    # Reverse for most recent first
+    lines_out.reverse()
+    return lines_out if lines_out else ["No log output available - start the engine with start.py"]
+
+
+# ============================================================
+# DATA LOADING
+# ============================================================
+
+def get_state():
+    """Load trading state from JSON file."""
+    state_path = Path(__file__).parent / "trading_state.json"
+    if state_path.exists():
+        with open(state_path) as f:
+            return json.load(f)
+    return {
+        "initial_capital": 10000,
+        "current_capital": 10000,
+        "total_pnl": 0,
+        "total_trades": 0,
+        "total_wins": 0,
+        "total_losses": 0,
+        "max_drawdown": 0
+    }
+
+
+def get_trades_df():
+    """Load trades from database into DataFrame."""
+    db_path = Path(__file__).parent / "data" / "live_0dte_trades.db"
+    if not db_path.exists():
+        return pd.DataFrame()
+    
+    conn = sqlite3.connect(str(db_path))
+    df = pd.read_sql_query("SELECT * FROM trades ORDER BY entry_time DESC", conn)
+    conn.close()
+    
+    if not df.empty:
+        df['entry_time'] = pd.to_datetime(df['entry_time'])
+        df['exit_time'] = pd.to_datetime(df['exit_time'])
+        df['trade_date'] = df['entry_time'].dt.date
+    
+    return df
+
+
+def get_today_trades(df):
+    """Filter to today's trades."""
+    if df.empty:
+        return df
+    today = date.today()
+    return df[df['trade_date'] == today]
+
+
+# ============================================================
+# CHARTS
+# ============================================================
+
+def get_option_type_from_symbol(symbol):
+    """Extract CALL or PUT from option symbol."""
+    import re
+    if not symbol:
+        return ""
+    match = re.search(r'[CP]\d', str(symbol))
+    if match:
+        return "PUT" if match.group()[0] == 'P' else "CALL"
+    return ""
+
+
+def create_equity_curve(state, initial_capital=10000):
+    """Create equity curve chart from state JSON."""
+    equity_curve = state.get('equity_curve', [])
+    
+    if not equity_curve or len(equity_curve) < 2:
+        fig = go.Figure()
+        fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+    else:
+        # Build equity curve from state
+        equities = [point.get('equity', initial_capital) for point in equity_curve]
+        pnls = [point.get('pnl', 0) for point in equity_curve]
+        types = [point.get('type', '-') for point in equity_curve]
+        
+        # Use datetime for x-axis, fall back to trade numbers if no time data
+        times = [point.get('time') for point in equity_curve]
+        has_times = any(t is not None for t in times)
+        
+        if has_times:
+            # Parse datetime strings for x-axis
+            x_values = []
+            for i, t in enumerate(times):
+                if t:
+                    try:
+                        x_values.append(pd.to_datetime(t))
+                    except:
+                        x_values.append(pd.Timestamp.now())
+                else:
+                    # For initial point without time, use first trade time minus 1 hour
+                    first_time = next((pd.to_datetime(tt) for tt in times if tt), pd.Timestamp.now())
+                    x_values.append(first_time - pd.Timedelta(hours=1))
+        else:
+            x_values = list(range(len(equity_curve)))
+        
+        # Color markers by type (PUT=blue, CALL=green)
+        colors = ['#00d9ff' if t == 'PUT' else '#00ff88' if t == 'CALL' else '#888' for t in types]
+        
+        # Hover text
+        if has_times:
+            hover_text = [f"Trade #{equity_curve[i].get('trade_id', i)}: {types[i]}<br>Time: {x_values[i].strftime('%Y-%m-%d %H:%M') if hasattr(x_values[i], 'strftime') else x_values[i]}<br>Equity: ${equities[i]:,.0f}<br>P&L: ${pnls[i]:+,.0f}" 
+                          for i in range(len(equity_curve))]
+        else:
+            hover_text = [f"Trade #{i}: {types[i]}<br>Equity: ${equities[i]:,.0f}<br>P&L: ${pnls[i]:+,.0f}" 
+                          for i in range(len(equity_curve))]
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=x_values,
+            y=equities,
+            mode='lines+markers',
+            name='Equity',
+            line=dict(color='#00d9ff', width=3),
+            marker=dict(size=10, color=colors),
+            hovertext=hover_text,
+            hoverinfo='text'
+        ))
+        
+        # Add initial capital line
+        fig.add_hline(y=initial_capital, line_dash="dash", line_color="#888", 
+                     annotation_text=f"Initial: ${initial_capital:,}")
+        
+        # Add high water mark line
+        hwm = state.get('high_water_mark', initial_capital)
+        if hwm > initial_capital:
+            fig.add_hline(y=hwm, line_dash="dot", line_color="#00ff88", 
+                         annotation_text=f"HWM: ${hwm:,.0f}")
+        
+        # Auto-focus on recent trades if there are many
+        num_trades = len(equity_curve)
+        x_range = None
+        
+        if num_trades > 30:
+            # Focus on last 30 trades
+            if has_times:
+                x_range = [x_values[-31], x_values[-1]]
+            else:
+                x_range = [num_trades - 31, num_trades]
+        
+        # Focus y-axis on the change (min/max with padding)
+        y_min = min(equities)
+        y_max = max(equities)
+        y_padding = (y_max - y_min) * 0.1 if y_max > y_min else 100
+        y_range = [y_min - y_padding, y_max + y_padding]
+        
+        fig.update_layout(
+            title="Equity Curve",
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=60, r=20, t=50, b=40),
+            showlegend=False,
+            xaxis=dict(
+                title="Time" if has_times else "Trade #",
+                title_font=dict(size=12, color='#888'),
+                range=x_range,
+                rangeslider=dict(visible=True, thickness=0.05, bgcolor='rgba(50,50,50,0.3)'),
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(100,100,100,0.3)',
+                showline=True,
+                linewidth=1,
+                linecolor='#555',
+                tickfont=dict(size=10, color='#aaa'),
+                tickformat='%m/%d %H:%M' if has_times else None,
+                zeroline=False,
+                showspikes=True,
+                spikecolor='#00d9ff',
+                spikethickness=1,
+                spikedash='dot',
+                spikemode='across'
+            ),
+            yaxis=dict(
+                title="Capital ($)",
+                title_font=dict(size=12, color='#888'),
+                range=y_range,
+                fixedrange=False,
+                tickprefix="$",
+                tickformat=",.0f",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='rgba(100,100,100,0.3)',
+                showline=True,
+                linewidth=1,
+                linecolor='#555',
+                tickfont=dict(size=10, color='#aaa'),
+                zeroline=False,
+                showspikes=True,
+                spikecolor='#00d9ff',
+                spikethickness=1,
+                spikedash='dot',
+                spikemode='across'
+            ),
+            hovermode='x unified'
+        )
+        return fig
+    
+    # Empty chart case - basic layout
+    fig.update_layout(
+        title="Equity Curve",
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
+    return fig
+
+
+def create_pnl_bars(state):
+    """Create P&L bar chart by trade from state."""
+    equity_curve = state.get('equity_curve', [])
+    
+    # Skip first entry (initial capital with pnl=0)
+    trades = [t for t in equity_curve if t.get('trade_id', 0) > 0]
+    trades = trades[-20:]  # Last 20
+    
+    if not trades:
+        fig = go.Figure()
+        fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+    else:
+        pnls = [t.get('pnl', 0) for t in trades]
+        types = [t.get('type', '-') for t in trades]
+        trade_ids = [t.get('trade_id', 0) for t in trades]
+        
+        # Green for profit, red for loss
+        colors = ['#00ff88' if p > 0 else '#ff4757' for p in pnls]
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=list(range(1, len(trades) + 1)),
+            y=pnls,
+            marker_color=colors,
+            text=[f"${p:+.0f}" for p in pnls],
+            textposition='outside',
+            hovertemplate='Trade #%{customdata[0]}<br>Type: %{customdata[1]}<br>P&L: $%{y:.2f}<extra></extra>',
+            customdata=list(zip(trade_ids, types))
+        ))
+    
+    fig.update_layout(
+        title="Trade P&L (Last 20)",
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=50, b=20),
+        xaxis_title="Trade #",
+        yaxis_title="P&L ($)",
+        yaxis_tickprefix="$",
+        showlegend=False
+    )
+    return fig
+
+
+def create_win_rate_gauge(wins, total):
+    """Create win rate gauge chart."""
+    win_rate = (wins / total * 100) if total > 0 else 0
+    
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=win_rate,
+        number={'suffix': '%', 'font': {'size': 40, 'color': '#00d9ff'}},
+        gauge={
+            'axis': {'range': [0, 100], 'tickcolor': '#888'},
+            'bar': {'color': '#00ff88' if win_rate >= 50 else '#ff4757'},
+            'bgcolor': 'rgba(0,0,0,0)',
+            'borderwidth': 0,
+            'steps': [
+                {'range': [0, 40], 'color': 'rgba(255,71,87,0.3)'},
+                {'range': [40, 60], 'color': 'rgba(255,165,0,0.3)'},
+                {'range': [60, 100], 'color': 'rgba(0,255,136,0.3)'}
+            ],
+            'threshold': {
+                'line': {'color': '#fff', 'width': 2},
+                'thickness': 0.75,
+                'value': win_rate
+            }
+        },
+        title={'text': 'Win Rate', 'font': {'color': '#888', 'size': 14}}
+    ))
+    
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=30, b=20),
+        height=200
+    )
+    return fig
+
+
+def create_today_pnl_indicator(today_pnl):
+    """Create today's P&L indicator."""
+    color = '#00ff88' if today_pnl >= 0 else '#ff4757'
+    
+    fig = go.Figure(go.Indicator(
+        mode="number+delta",
+        value=today_pnl,
+        number={'prefix': '$', 'font': {'size': 48, 'color': color}},
+        delta={'reference': 0, 'relative': False, 'valueformat': '.0f'},
+        title={'text': "Today's P&L", 'font': {'color': '#888', 'size': 14}}
+    ))
+    
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=30, b=20),
+        height=150
+    )
+    return fig
+
+
+# ============================================================
+# DASH APP
+# ============================================================
+
+app = Dash(__name__)
+app.title = "0DTE Trading Dashboard"
+
+# Custom CSS
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            body {
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 0;
+                min-height: 100vh;
+            }
+            .dash-table-container {
+                background: rgba(255,255,255,0.05) !important;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
+
+def serve_layout():
+    """Generate layout with fresh data."""
+    state = get_state()
+    df = get_trades_df()
+    today_df = get_today_trades(df)
+    
+    # Calculate metrics
+    today_pnl = today_df[today_df['status'] == 'closed']['pnl'].sum() if not today_df.empty else 0
+    today_wins = len(today_df[(today_df['status'] == 'closed') & (today_df['pnl'] > 0)]) if not today_df.empty else 0
+    today_losses = len(today_df[(today_df['status'] == 'closed') & (today_df['pnl'] <= 0)]) if not today_df.empty else 0
+    
+    initial_cap = state.get('initial_capital', 10000)
+    current_cap = state.get('current_capital', 10000)
+    total_pnl = state.get('total_pnl', 0)
+    total_return = ((current_cap - initial_cap) / initial_cap) * 100 if initial_cap > 0 else 0
+    
+    # Prepare table data
+    table_data = []
+    if not today_df.empty:
+        for _, t in today_df.iterrows():
+            pnl = t.get('pnl') or 0
+            pnl_pct = t.get('pnl_percent') or 0
+            status = t.get('status', 'open')
+            
+            if status == 'open':
+                pnl_display = 'OPEN'
+            elif pnl > 0:
+                pnl_display = f'+${pnl:.0f} (+{pnl_pct:.1f}%)'
+            else:
+                pnl_display = f'-${abs(pnl):.0f} ({pnl_pct:.1f}%)'
+            
+            table_data.append({
+                'Symbol': t.get('symbol', ''),
+                'Type': str(t.get('option_type', '')).upper(),
+                'Qty': t.get('quantity', 0),
+                'Entry': f"${t.get('entry_price', 0):.2f}",
+                'Exit': f"${t.get('exit_price', 0):.2f}" if t.get('exit_price') else '-',
+                'P&L': pnl_display,
+                'Entry Time': str(t.get('entry_time', ''))[:19],
+                'Status': status.upper()
+            })
+    
+    # Get system status
+    sys_status = get_system_status()
+    
+    # Status colors
+    def get_status_color(status_text):
+        if status_text in ['Valid', 'Running', 'OK'] or status_text.startswith('OK'):
+            return '#00ff88'
+        elif status_text in ['Expired', 'Error', 'Missing', 'Stale']:
+            return '#ff4757'
+        elif status_text in ['Slow', 'Unknown']:
+            return '#ffa500'
+        else:
+            return '#00d9ff'
+    
+    return html.Div([
+        # Header
+        html.Div([
+            html.H1("0DTE Trading Dashboard", style={
+                'background': 'linear-gradient(90deg, #00d9ff, #00ff88)',
+                'WebkitBackgroundClip': 'text',
+                'WebkitTextFillColor': 'transparent',
+                'fontSize': '2.5em',
+                'marginBottom': '10px'
+            }),
+            html.Span("PAPER TRADING", style={
+                'background': '#ffa500',
+                'color': '#000',
+                'padding': '5px 15px',
+                'borderRadius': '20px',
+                'fontWeight': 'bold'
+            })
+        ], style={'textAlign': 'center', 'padding': '20px', 'marginBottom': '20px'}),
+        
+        # System Status Bar
+        html.Div([
+            html.Div(id='status-bar'),
+            html.Div([
+                html.Button("🔄 Restart Engine", id='restart-btn', n_clicks=0, style={
+                    'background': 'linear-gradient(90deg, #ff4757, #ff6b81)',
+                    'color': '#fff',
+                    'border': 'none',
+                    'padding': '8px 20px',
+                    'borderRadius': '20px',
+                    'cursor': 'pointer',
+                    'fontWeight': 'bold',
+                    'marginLeft': '20px'
+                }),
+                html.Span(id='restart-status', style={'marginLeft': '10px'})
+            ], style={'marginTop': '10px', 'display': 'flex', 'alignItems': 'center'})
+        ], style={
+            'background': 'rgba(255,255,255,0.05)',
+            'borderRadius': '10px',
+            'padding': '15px 20px',
+            'marginBottom': '20px',
+            'border': '1px solid rgba(255,255,255,0.1)'
+        }),
+        
+        # Stats Cards Row
+        html.Div([
+            # Today's P&L
+            html.Div([
+                html.Div("TODAY'S P&L", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
+                html.Div(id='today-pnl-value', style={'fontSize': '2em', 'fontWeight': 'bold'}),
+                html.Div(id='today-pnl-dots')
+            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            
+            # Total P&L
+            html.Div([
+                html.Div("TOTAL P&L", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
+                html.Div(id='total-pnl-value', style={'fontSize': '2em', 'fontWeight': 'bold'})
+            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            
+            # Current Capital
+            html.Div([
+                html.Div("CURRENT CAPITAL", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
+                html.Div(id='current-capital-value', style={'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00d9ff'})
+            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            
+            # Total Return
+            html.Div([
+                html.Div("TOTAL RETURN", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
+                html.Div(id='total-return-value', style={'fontSize': '2em', 'fontWeight': 'bold'})
+            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            
+            # Win Rate
+            html.Div([
+                html.Div("WIN RATE", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
+                html.Div(id='win-rate-value', style={'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00d9ff'})
+            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            
+            # Max Drawdown
+            html.Div([
+                html.Div("MAX DRAWDOWN", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
+                html.Div(id='max-drawdown-value', style={'fontSize': '2em', 'fontWeight': 'bold', 'color': '#ff4757'})
+            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            
+        ], style={'display': 'flex', 'gap': '20px', 'marginBottom': '30px', 'flexWrap': 'wrap'}),
+        
+        # Charts Row
+        html.Div([
+            html.Div([
+                dcc.Graph(id='equity-chart', config={'displayModeBar': False})
+            ], style={'flex': '2', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '10px'}),
+            
+            html.Div([
+                dcc.Graph(id='pnl-chart', config={'displayModeBar': False})
+            ], style={'flex': '1', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '10px'}),
+        ], style={'display': 'flex', 'gap': '20px', 'marginBottom': '30px'}),
+        
+        # Gauge Row (removed for simplicity)
+        
+        # Trades Table
+        html.Div([
+            html.H2(f"Today's Trades ({date.today().isoformat()})", style={
+                'color': '#eee',
+                'fontSize': '1.3em',
+                'marginBottom': '15px',
+                'borderLeft': '4px solid #00d9ff',
+                'paddingLeft': '15px'
+            }),
+            dash_table.DataTable(
+                id='trades-table',
+                columns=[{'name': col, 'id': col} for col in ['Symbol', 'Type', 'Qty', 'Entry', 'Exit', 'P&L', 'Entry Time', 'Status']],
+                data=[],
+                style_header={
+                    'backgroundColor': 'rgba(0,217,255,0.2)',
+                    'color': '#eee',
+                    'fontWeight': 'bold',
+                    'border': 'none',
+                    'borderBottom': '2px solid rgba(0,217,255,0.3)'
+                },
+                style_cell={
+                    'backgroundColor': 'transparent',
+                    'color': '#eee',
+                    'border': 'none',
+                    'borderBottom': '1px solid rgba(255,255,255,0.1)',
+                    'padding': '12px 15px',
+                    'textAlign': 'left'
+                },
+                style_data_conditional=[
+                    {'if': {'filter_query': '{P&L} contains "+"'}, 'color': '#00ff88', 'fontWeight': 'bold'},
+                    {'if': {'filter_query': '{P&L} contains "-"'}, 'color': '#ff4757', 'fontWeight': 'bold'},
+                    {'if': {'filter_query': '{Status} = "OPEN"'}, 'color': '#ffa500'},
+                ],
+                style_table={'overflowX': 'auto'}
+            )
+        ], style={'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '25px', 'marginBottom': '20px'}),
+        
+        # Backend Terminal Output
+        html.Div([
+            html.H2("Backend Terminal Output", style={
+                'color': '#eee',
+                'fontSize': '1.3em',
+                'marginBottom': '15px',
+                'borderLeft': '4px solid #ffa500',
+                'paddingLeft': '15px'
+            }),
+            html.Div([
+                html.Div(id='log-output')
+            ], style={
+                'background': 'rgba(0,0,0,0.3)',
+                'borderRadius': '8px',
+                'maxHeight': '400px',
+                'overflowY': 'auto',
+                'overflowX': 'hidden',
+                'padding': '10px'
+            })
+        ], style={'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '25px', 'marginBottom': '20px'}),
+        
+        # Timestamp
+        html.Div(id='timestamp-display', 
+                style={'textAlign': 'center', 'color': '#666', 'fontSize': '0.85em'}),
+        
+        # Auto-refresh interval (3 seconds for real-time)
+        dcc.Interval(id='interval-component', interval=3*1000, n_intervals=0),
+        
+        # Store for restart signal
+        dcc.Store(id='restart-signal', data=0)
+        
+    ], style={'maxWidth': '1400px', 'margin': '0 auto', 'padding': '20px', 'color': '#eee'})
+
+
+app.layout = serve_layout
+
+
+# ============================================================
+# CALLBACKS FOR REAL-TIME UPDATES
+# ============================================================
+
+@app.callback(
+    [Output('today-pnl-value', 'children'),
+     Output('today-pnl-value', 'style'),
+     Output('today-pnl-dots', 'children'),
+     Output('total-pnl-value', 'children'),
+     Output('total-pnl-value', 'style'),
+     Output('current-capital-value', 'children'),
+     Output('total-return-value', 'children'),
+     Output('total-return-value', 'style'),
+     Output('win-rate-value', 'children'),
+     Output('max-drawdown-value', 'children'),
+     Output('timestamp-display', 'children'),
+     Output('status-bar', 'children'),
+     Output('log-output', 'children'),
+     Output('trades-table', 'data'),
+     Output('equity-chart', 'figure'),
+     Output('pnl-chart', 'figure')],
+    [Input('interval-component', 'n_intervals')]
+)
+def update_dashboard(n):
+    """Update all dashboard components in real-time."""
+    state = get_state()
+    df = get_trades_df()
+    today_df = get_today_trades(df)
+    
+    # Calculate metrics
+    today_pnl = today_df[today_df['status'] == 'closed']['pnl'].sum() if not today_df.empty else 0
+    today_wins = len(today_df[(today_df['status'] == 'closed') & (today_df['pnl'] > 0)]) if not today_df.empty else 0
+    today_losses = len(today_df[(today_df['status'] == 'closed') & (today_df['pnl'] <= 0)]) if not today_df.empty else 0
+    
+    initial_cap = state.get('initial_capital', 10000)
+    current_cap = state.get('current_capital', 10000)
+    total_pnl = state.get('total_pnl', 0)
+    total_return = ((current_cap - initial_cap) / initial_cap) * 100 if initial_cap > 0 else 0
+    
+    # Today P&L
+    today_pnl_text = f"{'+'if today_pnl >= 0 else ''}${today_pnl:.0f}"
+    today_pnl_style = {'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00ff88' if today_pnl >= 0 else '#ff4757'}
+    today_dots = [
+        html.Span("●" * today_wins, style={'color': '#00ff88', 'marginRight': '5px'}),
+        html.Span("●" * today_losses, style={'color': '#ff4757'})
+    ]
+    
+    # Total P&L
+    total_pnl_text = f"{'+'if total_pnl >= 0 else ''}${total_pnl:.0f}"
+    total_pnl_style = {'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00ff88' if total_pnl >= 0 else '#ff4757'}
+    
+    # Current Capital
+    current_cap_text = f"${current_cap:,.0f}"
+    
+    # Total Return
+    total_return_text = f"{total_return:+.1f}%"
+    total_return_style = {'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00ff88' if total_return >= 0 else '#ff4757'}
+    
+    # Win Rate
+    win_rate_text = f"{state.get('total_wins', 0)}/{state.get('total_trades', 0)}"
+    
+    # Max Drawdown
+    max_dd_text = f"{state.get('max_drawdown', 0)*100:.1f}%"
+    
+    # Timestamp
+    timestamp = f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Auto-refresh: 3s"
+    
+    # System Status Bar
+    sys_status = get_system_status()
+    def get_status_color(status_text):
+        if status_text in ['Valid', 'Running', 'OK', 'live'] or (isinstance(status_text, str) and status_text.startswith('OK')):
+            return '#00ff88'
+        elif status_text in ['Expired', 'Error', 'Missing', 'Stale']:
+            return '#ff4757'
+        elif status_text in ['Slow', 'Unknown', 'sleep', 'unknown']:
+            return '#ffa500'
+        return '#00d9ff'
+    
+    status_bar = html.Div([
+        html.Span("SYSTEM STATUS", style={'color': '#888', 'fontSize': '0.8em', 'marginRight': '20px'}),
+        html.Span([
+            html.Span("Engine: ", style={'color': '#888'}),
+            html.Span(state.get('engine_status', 'unknown'), style={'color': get_status_color(state.get('engine_status', 'unknown')), 'fontWeight': 'bold'})
+        ], style={'marginRight': '20px'}),
+        html.Span([
+            html.Span("Token: ", style={'color': '#888'}),
+            html.Span(sys_status['token_status'], style={'color': get_status_color(sys_status['token_status']), 'fontWeight': 'bold'}),
+            html.Span(f" (expires {sys_status['token_expires']})" if sys_status['token_expires'] else "", style={'color': '#666', 'fontSize': '0.9em'})
+        ], style={'marginRight': '20px'}),
+        html.Span([
+            html.Span("DB: ", style={'color': '#888'}),
+            html.Span(sys_status['db_status'], style={'color': get_status_color(sys_status['db_status']), 'fontWeight': 'bold'})
+        ], style={'marginRight': '20px'}),
+        html.Span([
+            html.Span("Last: ", style={'color': '#888'}),
+            html.Span(sys_status.get('last_quote_time', 'N/A'), style={'color': '#00d9ff'})
+        ])
+    ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '10px'})
+    
+    # Log Output
+    log_lines = get_recent_logs(50)
+    log_output = [
+        html.Span(
+            log_line,
+            style={
+                'display': 'block',
+                'padding': '4px 10px',
+                'borderBottom': '1px solid rgba(255,255,255,0.05)',
+                'color': '#00ff88' if any(x in log_line for x in ['ENTRY', 'EXIT', 'Signal', 'Got']) else
+                        '#ff4757' if any(x in log_line for x in ['ERROR', 'Exception', 'STOP LOSS', 'REJECTED']) else
+                        '#ffa500' if any(x in log_line for x in ['WARNING', '[DASHBOARD]']) else
+                        '#00d9ff' if any(x in log_line for x in ['Successfully', 'token', 'authenticated', '[ENGINE]']) else
+                        '#888' if '[SYSTEM]' in log_line else '#aaa',
+                'fontSize': '0.85em',
+                'fontFamily': 'Consolas, Monaco, monospace',
+                'whiteSpace': 'nowrap',
+                'overflow': 'hidden',
+                'textOverflow': 'ellipsis'
+            }
+        ) for log_line in log_lines
+    ]
+    
+    # Prepare table data
+    table_data = []
+    if not today_df.empty:
+        for _, t in today_df.iterrows():
+            pnl = t.get('pnl') or 0
+            pnl_pct = t.get('pnl_percent') or 0
+            status = t.get('status', 'open')
+            symbol = t.get('symbol', '')
+            # Get type from symbol if option_type is empty
+            opt_type = str(t.get('option_type', '')).upper()
+            if not opt_type:
+                opt_type = get_option_type_from_symbol(symbol)
+            if status == 'open':
+                pnl_display = 'OPEN'
+            elif pnl > 0:
+                pnl_display = f'+${pnl:.0f} (+{pnl_pct:.1f}%)'
+            else:
+                pnl_display = f'-${abs(pnl):.0f} ({pnl_pct:.1f}%)'
+            table_data.append({
+                'Symbol': symbol,
+                'Type': opt_type,
+                'Qty': t.get('quantity', 0),
+                'Entry': f"${t.get('entry_price', 0):.2f}",
+                'Exit': f"${t.get('exit_price', 0):.2f}" if t.get('exit_price') else '-',
+                'P&L': pnl_display,
+                'Entry Time': str(t.get('entry_time', ''))[:19],
+                'Status': status.upper()
+            })
+    
+    # Charts - use state for equity curve and P&L bars
+    equity_fig = create_equity_curve(state, initial_cap)
+    pnl_fig = create_pnl_bars(state)
+    
+    return (today_pnl_text, today_pnl_style, today_dots, total_pnl_text, total_pnl_style,
+            current_cap_text, total_return_text, total_return_style, win_rate_text, max_dd_text,
+            timestamp, status_bar, log_output, table_data, equity_fig, pnl_fig)
+
+
+@app.callback(
+    Output('restart-status', 'children'),
+    [Input('restart-btn', 'n_clicks')],
+    prevent_initial_call=True
+)
+def restart_engine(n_clicks):
+    """Restart the trading engine."""
+    if n_clicks:
+        try:
+            # Write restart signal file
+            restart_file = Path(__file__).parent / "logs" / "restart_signal.txt"
+            restart_file.parent.mkdir(exist_ok=True)
+            with open(restart_file, 'w') as f:
+                f.write(f"RESTART {datetime.now().isoformat()}")
+            return html.Span("Restart signal sent!", style={'color': '#00ff88'})
+        except Exception as e:
+            return html.Span(f"Error: {str(e)}", style={'color': '#ff4757'})
+    return ""
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="0DTE Trading Dashboard")
+    parser.add_argument("--port", type=int, default=8050, help="Port number (default: 8050)")
+    args = parser.parse_args()
+    
+    print(f"\n{'='*60}")
+    print("  0DTE TRADING DASHBOARD (Plotly Dash)")
+    print(f"{'='*60}")
+    print(f"  URL: http://localhost:{args.port}")
+    print(f"{'='*60}")
+    print("  Press Ctrl+C to stop\n")
+    
+    import webbrowser
+    webbrowser.open(f"http://localhost:{args.port}")
+    
+    app.run(debug=False, port=args.port, host='0.0.0.0')
+
+
+if __name__ == "__main__":
+    main()

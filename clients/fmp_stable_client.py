@@ -22,7 +22,7 @@ class FMPStableClient:
         params['apikey'] = self.api_key
 
         url = f"{self.base_url}/{endpoint}"
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
         return response.json()
 
@@ -223,8 +223,82 @@ class FMPStableClient:
         return self._get("batch-etf-quotes")
 
     def batch_commodity_quotes(self) -> List[Dict]:
-        """Up-to-the-minute quotes for commodities"""
+        """Up-to-the-minute quotes for commodities (PREMIUM - requires higher tier)"""
         return self._get("batch-commodity-quotes")
+
+    def commodities_list(self) -> List[Dict]:
+        """Get list of common tradable commodities with their FMP symbols.
+        Note: This is a curated list as the API endpoint requires premium tier.
+        Use commodity_quote(symbol) to get real-time prices.
+        """
+        return [
+            {"symbol": "GCUSD", "name": "Gold Futures", "currency": "USD"},
+            {"symbol": "SIUSD", "name": "Silver Futures", "currency": "USD"},
+            {"symbol": "CLUSD", "name": "Crude Oil WTI Futures", "currency": "USD"},
+            {"symbol": "NGUSD", "name": "Natural Gas Futures", "currency": "USD"},
+            {"symbol": "HGUSD", "name": "Copper Futures", "currency": "USD"},
+            {"symbol": "PLUSD", "name": "Platinum Futures", "currency": "USD"},
+            {"symbol": "PAUSD", "name": "Palladium Futures", "currency": "USD"},
+            {"symbol": "ZSUSD", "name": "Soybean Futures", "currency": "USD"},
+            {"symbol": "ZCUSD", "name": "Corn Futures", "currency": "USD"},
+            {"symbol": "ZWUSD", "name": "Wheat Futures", "currency": "USD"},
+            {"symbol": "CTUSD", "name": "Cotton Futures", "currency": "USD"},
+            {"symbol": "KCUSD", "name": "Coffee Futures", "currency": "USD"},
+            {"symbol": "SBUSD", "name": "Sugar Futures", "currency": "USD"},
+            {"symbol": "CCUSD", "name": "Cocoa Futures", "currency": "USD"},
+            {"symbol": "LCUSD", "name": "Live Cattle Futures", "currency": "USD"},
+            {"symbol": "LHUSD", "name": "Lean Hogs Futures", "currency": "USD"},
+        ]
+
+    def commodity_quote(self, symbol: str) -> List[Dict]:
+        """Real-time quote for single commodity (e.g., GCUSD for Gold, SIUSD for Silver)"""
+        return self._get("quote", {"symbol": symbol})
+
+    def commodity_quote_short(self, symbol: str) -> List[Dict]:
+        """Short quote for commodity (symbol, price, change, volume)"""
+        return self._get("quote-short", {"symbol": symbol})
+
+    def commodity_historical_eod_light(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
+        """Light EOD data for commodity (date, price, volume)"""
+        params = {"symbol": symbol}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        return self._get("historical-price-eod/light", params)
+
+    def commodity_historical_eod_full(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
+        """Full EOD data for commodity (OHLC, volume, change, vwap)"""
+        params = {"symbol": symbol}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        return self._get("historical-price-eod/full", params)
+
+    def commodity_intraday_1min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+        """1-minute intraday data for commodity"""
+        return self._get("historical-chart/1min", {"symbol": symbol, "from": from_date, "to": to_date})
+
+    def commodity_intraday_5min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+        """5-minute intraday data for commodity"""
+        return self._get("historical-chart/5min", {"symbol": symbol, "from": from_date, "to": to_date})
+
+    def commodity_intraday_15min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+        """15-minute intraday data for commodity"""
+        return self._get("historical-chart/15min", {"symbol": symbol, "from": from_date, "to": to_date})
+
+    def commodity_intraday_30min(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+        """30-minute intraday data for commodity"""
+        return self._get("historical-chart/30min", {"symbol": symbol, "from": from_date, "to": to_date})
+
+    def commodity_intraday_1hour(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+        """1-hour intraday data for commodity"""
+        return self._get("historical-chart/1hour", {"symbol": symbol, "from": from_date, "to": to_date})
+
+    def commodity_intraday_4hour(self, symbol: str, from_date: str, to_date: str) -> List[Dict]:
+        """4-hour intraday data for commodity"""
+        return self._get("historical-chart/4hour", {"symbol": symbol, "from": from_date, "to": to_date})
 
     def batch_crypto_quotes(self) -> List[Dict]:
         """Cryptocurrency quotes"""
@@ -706,55 +780,55 @@ class FMPStableClient:
 
     # ==================== 14. TECHNICAL INDICATORS (9 endpoints) ====================
 
-    def technical_sma(self, symbol: str, period_length: int, timeframe: str = "daily") -> List[Dict]:
+    def technical_sma(self, symbol: str, period_length: int, timeframe: str = "1day") -> List[Dict]:
         """Simple Moving Average"""
         return self._get("technical-indicators/sma", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_ema(self, symbol: str, period_length: int, timeframe: str = "daily") -> List[Dict]:
+    def technical_ema(self, symbol: str, period_length: int, timeframe: str = "1day") -> List[Dict]:
         """Exponential Moving Average"""
         return self._get("technical-indicators/ema", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_wma(self, symbol: str, period_length: int, timeframe: str = "daily") -> List[Dict]:
+    def technical_wma(self, symbol: str, period_length: int, timeframe: str = "1day") -> List[Dict]:
         """Weighted Moving Average"""
         return self._get("technical-indicators/wma", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_dema(self, symbol: str, period_length: int, timeframe: str = "daily") -> List[Dict]:
+    def technical_dema(self, symbol: str, period_length: int, timeframe: str = "1day") -> List[Dict]:
         """Double Exponential Moving Average"""
         return self._get("technical-indicators/dema", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_tema(self, symbol: str, period_length: int, timeframe: str = "daily") -> List[Dict]:
+    def technical_tema(self, symbol: str, period_length: int, timeframe: str = "1day") -> List[Dict]:
         """Triple Exponential Moving Average"""
         return self._get("technical-indicators/tema", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_rsi(self, symbol: str, period_length: int = 14, timeframe: str = "daily") -> List[Dict]:
+    def technical_rsi(self, symbol: str, period_length: int = 14, timeframe: str = "1day") -> List[Dict]:
         """Relative Strength Index"""
         return self._get("technical-indicators/rsi", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_standarddeviation(self, symbol: str, period_length: int, timeframe: str = "daily") -> List[Dict]:
+    def technical_standarddeviation(self, symbol: str, period_length: int, timeframe: str = "1day") -> List[Dict]:
         """Standard Deviation calculation"""
         return self._get("technical-indicators/standarddeviation", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_williams(self, symbol: str, period_length: int = 14, timeframe: str = "daily") -> List[Dict]:
+    def technical_williams(self, symbol: str, period_length: int = 14, timeframe: str = "1day") -> List[Dict]:
         """Williams %R indicator"""
         return self._get("technical-indicators/williams", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
         })
 
-    def technical_adx(self, symbol: str, period_length: int = 14, timeframe: str = "daily") -> List[Dict]:
+    def technical_adx(self, symbol: str, period_length: int = 14, timeframe: str = "1day") -> List[Dict]:
         """Average Directional Index"""
         return self._get("technical-indicators/adx", {
             "symbol": symbol, "periodLength": period_length, "timeframe": timeframe
@@ -917,8 +991,130 @@ class FMPStableClient:
         """Dow Jones company data"""
         return self._get("dowjones-constituent")
 
-    # Index quotes use same quote endpoints with index symbols
-    # Index historical uses same historical endpoints with index symbols
+    def historical_sp500_constituent(self) -> List[Dict]:
+        """Historical S&P 500 changes (additions/removals)"""
+        return self._get("historical-sp500-constituent")
+
+    def historical_nasdaq_constituent(self) -> List[Dict]:
+        """Historical NASDAQ changes (additions/removals)"""
+        return self._get("historical-nasdaq-constituent")
+
+    def historical_dowjones_constituent(self) -> List[Dict]:
+        """Historical Dow Jones changes"""
+        return self._get("historical-dowjones-constituent")
+
+    # ==================== 19. ETF DATA (6 endpoints) ====================
+
+    def etf_holdings(self, symbol: str, date: Optional[str] = None) -> List[Dict]:
+        """Get ETF holdings with weights and market values
+        
+        Args:
+            symbol: ETF symbol (e.g., QQQ, SPY)
+            date: Optional date in YYYY-MM-DD format for historical holdings
+        """
+        params = {"symbol": symbol}
+        if date:
+            params["date"] = date
+        return self._get("etf/holdings", params)
+
+    def etf_asset_exposure(self, symbol: str) -> List[Dict]:
+        """Get which ETFs hold a specific stock
+        
+        Args:
+            symbol: Stock symbol (e.g., AAPL, NVDA)
+        """
+        return self._get("etf/asset-exposure", {"symbol": symbol})
+
+    def etf_sector_weightings(self, symbol: str) -> List[Dict]:
+        """Get sector weightings for an ETF"""
+        return self._get("etf-sector-weightings", {"symbol": symbol})
+
+    def etf_country_weightings(self, symbol: str) -> List[Dict]:
+        """Get country weightings for an ETF"""
+        return self._get("etf-country-weightings", {"symbol": symbol})
+
+    def etf_holder_bulk(self, date: Optional[str] = None) -> List[Dict]:
+        """Bulk ETF holdings data"""
+        params = {}
+        if date:
+            params["date"] = date
+        return self._get("etf-holder-bulk", params)
+
+    # ==================== 20. MARKET MOVERS (4 endpoints) ====================
+
+    def biggest_gainers(self) -> List[Dict]:
+        """Get stocks with largest price increases today"""
+        return self._get("biggest-gainers")
+
+    def biggest_losers(self) -> List[Dict]:
+        """Get stocks with largest price decreases today"""
+        return self._get("biggest-losers")
+
+    def most_actives(self) -> List[Dict]:
+        """Get most actively traded stocks by volume"""
+        return self._get("most-actives")
+
+    # ==================== 21. SECTOR PERFORMANCE (2 endpoints) ====================
+
+    def sector_performance(self) -> List[Dict]:
+        """Get current sector performance"""
+        return self._get("sector-performance")
+
+    def historical_sector_performance(self, sector: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
+        """Get historical sector performance
+        
+        Args:
+            sector: Sector name (e.g., "Technology", "Energy")
+            from_date: Start date YYYY-MM-DD
+            to_date: End date YYYY-MM-DD
+        """
+        params = {"sector": sector}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        return self._get("historical-sector-performance", params)
+
+    # ==================== 22. INDEX INTRADAY (4 endpoints) ====================
+
+    def index_intraday_1min(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
+        """Get 1-minute index intraday data
+        
+        Args:
+            symbol: Index symbol (e.g., ^NDX for NASDAQ-100, ^GSPC for S&P 500)
+        """
+        params = {"symbol": symbol}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        return self._get("historical-chart/1min", params)
+
+    def index_intraday_5min(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
+        """Get 5-minute index intraday data"""
+        params = {"symbol": symbol}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        return self._get("historical-chart/5min", params)
+
+    def index_intraday_1hour(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
+        """Get 1-hour index intraday data"""
+        params = {"symbol": symbol}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        return self._get("historical-chart/1hour", params)
+
+    def index_quote(self, symbol: str) -> List[Dict]:
+        """Get real-time index quote
+        
+        Args:
+            symbol: Index symbol (^NDX, ^GSPC, ^DJI, ^IXIC)
+        """
+        return self._get("quote", {"symbol": symbol})
 
     # ==================== UTILITY METHODS ====================
 
@@ -943,7 +1139,7 @@ class FMPStableClient:
 
     def stock_news(self, tickers: str = "", limit: int = 50) -> List[Dict]:
         """Stock specific news"""
-        return self._get("stock_news", {"tickers": tickers, "limit": limit})
+        return self._get("news/stock", {"symbols": tickers, "limit": limit})
 
 
 # Factory function

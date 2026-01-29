@@ -94,6 +94,26 @@ class MarketDatabase:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_intraday_date ON intraday_ticker_data(date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_intraday_ticker_date ON intraday_ticker_data(ticker, date)')
 
+        # Table for 5-minute intraday data (FMP)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS intraday_5min_data (
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                date TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume INTEGER,
+                timeframe TEXT DEFAULT '5min',
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ticker, timestamp)
+            )
+        ''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_5min_ticker_date ON intraday_5min_data(ticker, date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_5min_date ON intraday_5min_data(date)')
+
         self.conn.commit()
 
         # Table for real-time quotes collected via REST streaming
@@ -155,6 +175,79 @@ class MarketDatabase:
         
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_hist_ticker ON option_price_history(ticker)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_hist_date ON option_price_history(date)')
+
+        # Table for raw option trades
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS option_trades (
+                ticker TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                price REAL,
+                size INTEGER,
+                side TEXT,
+                action TEXT,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_trades_ticker_ts ON option_trades(ticker, timestamp)')
+
+        # Table for option greeks
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS option_greeks (
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                date TEXT NOT NULL,
+                delta REAL,
+                gamma REAL,
+                theta REAL,
+                vega REAL,
+                rho REAL,
+                vanna REAL,
+                charm REAL,
+                vomma REAL,
+                veta REAL,
+                vera REAL,
+                speed REAL,
+                zomma REAL,
+                color REAL,
+                ultima REAL,
+                d1 REAL,
+                d2 REAL,
+                dual_delta REAL,
+                dual_gamma REAL,
+                implied_vol REAL,
+                underlying_price REAL,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ticker, timestamp)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_greeks_ticker_date ON option_greeks(ticker, date)')
+
+        # Table for option open interest
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS option_open_interest (
+                ticker TEXT NOT NULL,
+                date TEXT NOT NULL,
+                open_interest INTEGER,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ticker, date)
+            )
+        ''')
+
+        # Table for Massive options chain snapshots
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS massive_option_chain (
+                ticker TEXT NOT NULL,
+                underlying_asset TEXT NOT NULL,
+                expiration_date TEXT,
+                strike_price REAL,
+                contract_type TEXT,
+                details TEXT, -- JSON string of full details
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ticker, fetched_at)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_massive_underlying ON massive_option_chain(underlying_asset)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_massive_fetched ON massive_option_chain(fetched_at)')
 
         self.conn.commit()
 
@@ -428,6 +521,18 @@ class MarketDatabase:
         row = cursor.fetchone()
         return row[0] if row else 0
 
+    def insert_option_trades_bulk(self, trades: list):
+        """
+        Bulk insert option trades.
+        trades: list of tuples (ticker, timestamp, price, size, side, action)
+        """
+        cursor = self.conn.cursor()
+        cursor.executemany('''
+            INSERT INTO option_trades (ticker, timestamp, price, size, side, action)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', trades)
+        self.conn.commit()
+
     def close(self):
         """Close database connection"""
         if self.conn:
@@ -593,6 +698,19 @@ class MarketDatabase:
             
         return results
 
+    def insert_option_history_bulk(self, history_data: list):
+        """
+        Bulk insert option price history (OHLC).
+        history_data: list of tuples (ticker, date, timestamp, open, high, low, close, volume, vwap, transactions, timespan)
+        """
+        cursor = self.conn.cursor()
+        cursor.executemany('''
+            INSERT OR REPLACE INTO option_price_history 
+            (ticker, date, timestamp, open, high, low, close, volume, vwap, transactions, timespan)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', history_data)
+        self.conn.commit()
+
     def insert_realtime_quote(self, ticker: str, price: float, bid_price: float,
                                ask_price: float, volume: float, source: str,
                                quote_timestamp: str):
@@ -612,3 +730,581 @@ class MarketDatabase:
             quote_timestamp
         ))
         self.conn.commit()
+
+    def insert_option_greeks(self, greeks_data: list):
+        """
+        Insert option greeks data.
+        greeks_data: list of dicts
+        """
+        cursor = self.conn.cursor()
+        for item in greeks_data:
+            # Check if columns exist (simple migration for dev)
+            # In production, use proper migrations. 
+            # Here we just try to insert with all columns.
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO option_greeks 
+                    (ticker, timestamp, date, delta, gamma, theta, vega, rho, 
+                     vanna, charm, vomma, veta, vera, speed, zomma, color, ultima, 
+                     d1, d2, dual_delta, dual_gamma, implied_vol, underlying_price)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    item['ticker'],
+                    item['timestamp'],
+                    item['date'],
+                    item.get('delta'),
+                    item.get('gamma'),
+                    item.get('theta'),
+                    item.get('vega'),
+                    item.get('rho'),
+                    item.get('vanna'),
+                    item.get('charm'),
+                    item.get('vomma'),
+                    item.get('veta'),
+                    item.get('vera'),
+                    item.get('speed'),
+                    item.get('zomma'),
+                    item.get('color'),
+                    item.get('ultima'),
+                    item.get('d1'),
+                    item.get('d2'),
+                    item.get('dual_delta'),
+                    item.get('dual_gamma'),
+                    item.get('implied_vol'),
+                    item.get('underlying_price')
+                ))
+            except sqlite3.OperationalError as e:
+                # If column missing, we might need to alter table or just ignore for now
+                # For this session, let's assume the table is recreated or we just log
+                print(f"Error inserting greeks: {e}")
+                break
+        self.conn.commit()
+
+    def insert_option_open_interest(self, oi_data: list):
+        """
+        Insert option open interest data.
+        oi_data: list of dicts with keys: ticker, date, open_interest
+        """
+        cursor = self.conn.cursor()
+        for item in oi_data:
+            cursor.execute('''
+                INSERT OR REPLACE INTO option_open_interest 
+                (ticker, date, open_interest)
+                VALUES (?, ?, ?)
+            ''', (
+                item['ticker'],
+                item['date'],
+                item['open_interest']
+            ))
+        self.conn.commit()
+
+    def insert_massive_option_chain(self, chain_data: list):
+        """
+        Insert data from Massive options chain.
+        chain_data: list of dicts containing option details.
+        Expected keys in dict: ticker, underlying_asset, expiration_date, strike_price, contract_type, details (dict/json)
+        """
+        cursor = self.conn.cursor()
+        import json
+        
+        for item in chain_data:
+            details_json = json.dumps(item.get('details', {})) if isinstance(item.get('details'), dict) else item.get('details', '{}')
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO massive_option_chain 
+                (ticker, underlying_asset, expiration_date, strike_price, contract_type, details, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (
+                item.get('ticker'),
+                item.get('underlying_asset'),
+                item.get('expiration_date'),
+                item.get('strike_price'),
+                item.get('contract_type'),
+                details_json
+            ))
+        self.conn.commit()
+
+    def get_massive_option_chain(self, ticker: str = None, underlying_asset: str = None):
+        """
+        Get Massive options chain data.
+        """
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM massive_option_chain WHERE 1=1"
+        params = []
+        
+        if ticker:
+            query += " AND ticker = ?"
+            params.append(ticker)
+        
+        if underlying_asset:
+            query += " AND underlying_asset = ?"
+            params.append(underlying_asset)
+            
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        results = []
+        import json
+        for row in rows:
+            # row keys: ticker, underlying_asset, expiration_date, strike_price, contract_type, details, fetched_at
+            results.append({
+                'ticker': row[0],
+                'underlying_asset': row[1],
+                'expiration_date': row[2],
+                'strike_price': row[3],
+                'contract_type': row[4],
+                'details': json.loads(row[5]) if row[5] else {},
+                'fetched_at': row[6]
+            })
+        return results
+
+    # =============================================
+    # 5-MINUTE INTRADAY DATA (FMP)
+    # =============================================
+    
+    def insert_intraday_5min(self, ticker: str, data: list):
+        """
+        Insert 5-minute intraday data from FMP.
+        
+        Args:
+            ticker: Stock symbol (e.g., SPY)
+            data: List of dicts with keys: date, open, high, low, close, volume
+        """
+        cursor = self.conn.cursor()
+        
+        for row in data:
+            timestamp = row.get('date')
+            if not timestamp:
+                continue
+            
+            # Extract date part for indexing
+            date_part = timestamp.split(' ')[0] if ' ' in timestamp else timestamp[:10]
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO intraday_5min_data
+                (ticker, timestamp, date, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                ticker.upper(),
+                timestamp,
+                date_part,
+                row.get('open'),
+                row.get('high'),
+                row.get('low'),
+                row.get('close'),
+                row.get('volume')
+            ))
+        
+        self.conn.commit()
+    
+    def get_intraday_5min(self, ticker: str, start_date: str = None, end_date: str = None) -> list:
+        """
+        Get 5-minute intraday data from cache.
+        
+        Args:
+            ticker: Stock symbol
+            start_date: Optional start date YYYY-MM-DD
+            end_date: Optional end date YYYY-MM-DD
+            
+        Returns:
+            List of dicts matching FMP format
+        """
+        cursor = self.conn.cursor()
+        
+        query = '''
+            SELECT timestamp, open, high, low, close, volume
+            FROM intraday_5min_data
+            WHERE ticker = ?
+        '''
+        params = [ticker.upper()]
+        
+        if start_date:
+            query += ' AND date >= ?'
+            params.append(start_date)
+        
+        if end_date:
+            query += ' AND date <= ?'
+            params.append(end_date)
+        
+        query += ' ORDER BY timestamp ASC'
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        results = []
+        for row in rows:
+            results.append({
+                'date': row[0],
+                'open': row[1],
+                'high': row[2],
+                'low': row[3],
+                'close': row[4],
+                'volume': row[5]
+            })
+        
+        return results
+    
+    def get_underlying_price_on_date(self, ticker: str, date: str) -> float:
+        """Get the close price of underlying on a specific date (for filtering options)"""
+        cursor = self.conn.cursor()
+        # Try to get the average close price for that day from 5min data
+        cursor.execute('''
+            SELECT AVG(close) as avg_close
+            FROM intraday_5min_data
+            WHERE ticker = ? AND date = ?
+        ''', (ticker.upper(), date))
+        row = cursor.fetchone()
+        if row and row[0]:
+            return float(row[0])
+        
+        # Fall back to daily data
+        cursor.execute('''
+            SELECT close FROM daily_ticker_data
+            WHERE ticker = ? AND date = ?
+        ''', (ticker.upper(), date))
+        row = cursor.fetchone()
+        if row and row[0]:
+            return float(row[0])
+        
+        return None
+    
+    def get_intraday_5min_cached_dates(self, ticker: str) -> set:
+        """Get set of dates that have 5min data cached"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT date FROM intraday_5min_data
+            WHERE ticker = ?
+        ''', (ticker.upper(),))
+        return set(row[0] for row in cursor.fetchall())
+    
+    def get_intraday_5min_stats(self, ticker: str = None) -> dict:
+        """Get statistics about cached 5min data"""
+        cursor = self.conn.cursor()
+        
+        if ticker:
+            cursor.execute('''
+                SELECT 
+                    ticker,
+                    MIN(date) as first_date,
+                    MAX(date) as last_date,
+                    COUNT(DISTINCT date) as num_days,
+                    COUNT(*) as total_bars,
+                    MAX(cached_at) as last_updated
+                FROM intraday_5min_data
+                WHERE ticker = ?
+                GROUP BY ticker
+            ''', (ticker.upper(),))
+        else:
+            cursor.execute('''
+                SELECT 
+                    ticker,
+                    MIN(date) as first_date,
+                    MAX(date) as last_date,
+                    COUNT(DISTINCT date) as num_days,
+                    COUNT(*) as total_bars,
+                    MAX(cached_at) as last_updated
+                FROM intraday_5min_data
+                GROUP BY ticker
+            ''')
+        
+        rows = cursor.fetchall()
+        stats = {}
+        for row in rows:
+            stats[row[0]] = {
+                'first_date': row[1],
+                'last_date': row[2],
+                'num_days': row[3],
+                'total_bars': row[4],
+                'last_updated': row[5]
+            }
+        return stats
+
+    # =============================================
+    # OPTIONS INTRADAY DATA (Massive/Polygon)
+    # =============================================
+    
+    def _init_options_intraday_table(self):
+        """Initialize options intraday tables"""
+        cursor = self.conn.cursor()
+        
+        # Options minute-level OHLCV data
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS options_intraday (
+                option_ticker TEXT NOT NULL,
+                underlying TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume INTEGER,
+                vwap REAL,
+                transactions INTEGER,
+                timespan TEXT DEFAULT 'minute',
+                expiration TEXT,
+                strike REAL,
+                option_type TEXT,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (option_ticker, timestamp, timespan)
+            )
+        ''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_intra_underlying ON options_intraday(underlying, date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_intra_date ON options_intraday(date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_intra_expiration ON options_intraday(expiration)')
+        
+        # Track which option contracts we've cached
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS options_contracts_cached (
+                option_ticker TEXT NOT NULL,
+                underlying TEXT NOT NULL,
+                expiration TEXT NOT NULL,
+                strike REAL NOT NULL,
+                option_type TEXT NOT NULL,
+                first_date TEXT,
+                last_date TEXT,
+                bar_count INTEGER DEFAULT 0,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (option_ticker)
+            )
+        ''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_opt_cached_underlying ON options_contracts_cached(underlying, expiration)')
+        
+        self.conn.commit()
+    
+    def insert_options_intraday(self, data: list):
+        """
+        Insert options intraday OHLCV data.
+        
+        Args:
+            data: List of dicts with keys:
+                - option_ticker: e.g., O:SPY250117C00500000
+                - underlying: e.g., SPY
+                - timestamp: Unix timestamp in ms
+                - open, high, low, close, volume, vwap, transactions
+                - expiration: YYYY-MM-DD
+                - strike: float
+                - option_type: call/put
+        """
+        self._init_options_intraday_table()
+        cursor = self.conn.cursor()
+        
+        from datetime import datetime
+        
+        for row in data:
+            ts_ms = row.get('timestamp') or row.get('t')
+            if not ts_ms:
+                continue
+            
+            # Convert timestamp
+            dt = datetime.fromtimestamp(ts_ms / 1000.0)
+            date_str = dt.strftime('%Y-%m-%d')
+            time_str = dt.strftime('%H:%M:%S')
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO options_intraday
+                (option_ticker, underlying, timestamp, date, time, open, high, low, close, 
+                 volume, vwap, transactions, timespan, expiration, strike, option_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                row.get('option_ticker'),
+                row.get('underlying'),
+                ts_ms,
+                date_str,
+                time_str,
+                row.get('open') or row.get('o'),
+                row.get('high') or row.get('h'),
+                row.get('low') or row.get('l'),
+                row.get('close') or row.get('c'),
+                row.get('volume') or row.get('v'),
+                row.get('vwap') or row.get('vw'),
+                row.get('transactions') or row.get('n'),
+                row.get('timespan', 'minute'),
+                row.get('expiration'),
+                row.get('strike'),
+                row.get('option_type')
+            ))
+        
+        self.conn.commit()
+    
+    def get_options_intraday(self, underlying: str = None, option_ticker: str = None,
+                             date: str = None, start_date: str = None, end_date: str = None,
+                             expiration: str = None, option_type: str = None,
+                             strike_min: float = None, strike_max: float = None) -> list:
+        """
+        Get options intraday data with flexible filtering.
+        
+        Args:
+            underlying: Filter by underlying (e.g., SPY)
+            option_ticker: Filter by specific option ticker
+            date: Filter by specific date
+            start_date/end_date: Date range filter
+            expiration: Filter by expiration date
+            option_type: Filter by call/put
+            strike_min/strike_max: Strike price range
+            
+        Returns:
+            List of bar dicts
+        """
+        self._init_options_intraday_table()
+        cursor = self.conn.cursor()
+        
+        query = 'SELECT * FROM options_intraday WHERE 1=1'
+        params = []
+        
+        if option_ticker:
+            query += ' AND option_ticker = ?'
+            params.append(option_ticker)
+        
+        if underlying:
+            query += ' AND underlying = ?'
+            params.append(underlying.upper())
+        
+        if date:
+            query += ' AND date = ?'
+            params.append(date)
+        
+        if start_date:
+            query += ' AND date >= ?'
+            params.append(start_date)
+        
+        if end_date:
+            query += ' AND date <= ?'
+            params.append(end_date)
+        
+        if expiration:
+            query += ' AND expiration = ?'
+            params.append(expiration)
+        
+        if option_type:
+            query += ' AND option_type = ?'
+            params.append(option_type.lower())
+        
+        if strike_min is not None:
+            query += ' AND strike >= ?'
+            params.append(strike_min)
+        
+        if strike_max is not None:
+            query += ' AND strike <= ?'
+            params.append(strike_max)
+        
+        query += ' ORDER BY timestamp ASC'
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        # Get column names
+        columns = [desc[0] for desc in cursor.description]
+        
+        results = []
+        for row in rows:
+            results.append(dict(zip(columns, row)))
+        
+        return results
+    
+    def get_0dte_options_for_date(self, underlying: str, date: str) -> list:
+        """
+        Get all 0DTE options data for a specific date.
+        0DTE = options expiring on the same day.
+        
+        Args:
+            underlying: e.g., SPY
+            date: YYYY-MM-DD
+            
+        Returns:
+            List of option bar dicts where expiration == date
+        """
+        return self.get_options_intraday(
+            underlying=underlying,
+            date=date,
+            expiration=date
+        )
+    
+    def update_options_contract_cache_info(self, option_ticker: str, underlying: str,
+                                           expiration: str, strike: float, option_type: str,
+                                           first_date: str, last_date: str, bar_count: int):
+        """Update the cache tracking table for an option contract"""
+        self._init_options_intraday_table()
+        cursor = self.conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO options_contracts_cached
+            (option_ticker, underlying, expiration, strike, option_type, first_date, last_date, bar_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (option_ticker, underlying.upper(), expiration, strike, option_type.lower(),
+              first_date, last_date, bar_count))
+        
+        self.conn.commit()
+    
+    def get_cached_option_contracts(self, underlying: str = None, expiration: str = None) -> list:
+        """Get list of cached option contracts"""
+        self._init_options_intraday_table()
+        cursor = self.conn.cursor()
+        
+        query = 'SELECT * FROM options_contracts_cached WHERE 1=1'
+        params = []
+        
+        if underlying:
+            query += ' AND underlying = ?'
+            params.append(underlying.upper())
+        
+        if expiration:
+            query += ' AND expiration = ?'
+            params.append(expiration)
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+    
+    def get_options_intraday_stats(self, underlying: str = None) -> dict:
+        """Get statistics about cached options intraday data"""
+        self._init_options_intraday_table()
+        cursor = self.conn.cursor()
+        
+        if underlying:
+            cursor.execute('''
+                SELECT 
+                    underlying,
+                    COUNT(DISTINCT option_ticker) as contracts,
+                    COUNT(DISTINCT date) as trading_days,
+                    COUNT(*) as total_bars,
+                    MIN(date) as first_date,
+                    MAX(date) as last_date,
+                    COUNT(DISTINCT expiration) as expirations
+                FROM options_intraday
+                WHERE underlying = ?
+                GROUP BY underlying
+            ''', (underlying.upper(),))
+        else:
+            cursor.execute('''
+                SELECT 
+                    underlying,
+                    COUNT(DISTINCT option_ticker) as contracts,
+                    COUNT(DISTINCT date) as trading_days,
+                    COUNT(*) as total_bars,
+                    MIN(date) as first_date,
+                    MAX(date) as last_date,
+                    COUNT(DISTINCT expiration) as expirations
+                FROM options_intraday
+                GROUP BY underlying
+            ''')
+        
+        rows = cursor.fetchall()
+        stats = {}
+        for row in rows:
+            stats[row[0]] = {
+                'contracts': row[1],
+                'trading_days': row[2],
+                'total_bars': row[3],
+                'first_date': row[4],
+                'last_date': row[5],
+                'expirations': row[6]
+            }
+        return stats
+
+

@@ -1,0 +1,150 @@
+{
+  "strategy": "orb",
+  "trade_config": {
+    "strategy": "orb",
+    "profit_target_pct": 0.22,
+    "stop_loss_pct": 0.25,
+    "use_ml_filter": false,
+    "skip_day_filter": true,
+    "use_adaptive_exits": false,
+    "profit_low_vol": 0.12,
+    "profit_mid_vol": 0.15,
+    "profit_high_vol": 0.20,
+    "stop_low_vol": 0.15,
+    "stop_mid_vol": 0.20,
+    "stop_high_vol": 0.25,
+    "use_trailing_stop": false,
+    "use_time_decay_exit": true,
+    "time_decay_profit_per_bar": 0.03,
+    "min_profit_target": 0.10,
+    "use_quick_exit": true,
+    "underwater_stop_tighten": 0.15,
+    "quick_exit_profit_threshold": 0.05,
+    "breakeven_buffer_pct": 0.02,
+    "trade_start_hour": 9,
+    "trade_start_minute": 30,
+    "trade_end_hour": 15,
+    "trade_end_minute": 55,
+    "exit_hour": 16,
+    "max_hold_minutes": 5,
+    "rsi_call_threshold": 70,
+    "rsi_put_threshold": 30,
+    "bb_buffer_pct": 0.0,
+    "vwap_dev_threshold": 0.3,
+    "orb_minutes": 30,
+    "orb_buffer_pct": 0.1,
+    "min_option_price": 0.50,
+    "max_option_price": 1.00
+  },
+  "strategy_presets": {
+    "momentum": {
+      "description": "RSI Momentum: Trade with trend. RSI > 70 → CALL, RSI < 30 → PUT",
+      "rsi_call_threshold": 70,
+      "rsi_put_threshold": 30
+    },
+    "mean_reversion": {
+      "description": "RSI Mean Reversion: Fade extremes. RSI < 30 → CALL, RSI > 70 → PUT",
+      "rsi_call_threshold": 30,
+      "rsi_put_threshold": 70
+    },
+    "bb_breakout": {
+      "description": "Bollinger Band Breakout: Trade breakouts beyond bands",
+      "bb_buffer_pct": 0.0
+    },
+    "vwap_reversion": {
+      "description": "VWAP Reversion: Fade deviations from VWAP",
+      "vwap_dev_threshold": 0.3
+    },
+    "orb": {
+      "description": "Opening Range Breakout: Trade breakouts of first 30 min range",
+      "orb_minutes": 30,
+      "orb_buffer_pct": 0.1
+    }
+  },
+  "strategy_comparison_2025": {
+    "note": "All strategies tested on 2025 out-of-sample data (179 days)",
+    "orb": {
+      "trades": 1004,
+      "win_rate": 91.2,
+      "pnl": 6929698,
+      "max_dd": 2.3,
+      "profit_factor": 50.93,
+      "rank": 1
+    },
+    "momentum": {
+      "trades": 712,
+      "win_rate": 89.3,
+      "pnl": 4165551,
+      "max_dd": 4.6,
+      "profit_factor": 31.24,
+      "rank": 2
+    },
+    "vwap_reversion": {
+      "trades": 266,
+      "win_rate": 78.9,
+      "pnl": 1709604,
+      "max_dd": 1.6,
+      "profit_factor": 16.36,
+      "rank": 3
+    },
+    "bb_breakout": {
+      "trades": 160,
+      "win_rate": 75.6,
+      "pnl": 1051647,
+      "max_dd": 4.5,
+      "profit_factor": 15.47,
+      "rank": 4
+    },
+    "mean_reversion": {
+      "trades": 416,
+      "win_rate": 72.1,
+      "pnl": 1760000,
+      "max_dd": 5.0,
+      "profit_factor": 10.0,
+      "rank": 5
+    }
+  },
+  "risk_config": {
+    "kelly_fraction": 0.20,
+    "max_risk_per_trade_pct": 0.02,
+    "max_position_pct": 0.07,
+    "max_position_value": 5000,
+    "stop_after_first_loss": true,
+    "max_consecutive_losses": 2,
+    "reduce_size_at_dd_pct": 0.05
+  },
+  "backtest": {
+    "initial_capital": 10000,
+    "train_start": "2024-01-01",
+    "train_end": "2024-06-30",
+    "test_start": "2024-07-01",
+    "test_end": "2024-12-31"
+  },
+  "optimized_results": {
+    "train_period": "Jan-Jun 2024",
+    "train_trades": 156,
+    "train_win_rate": 75.6,
+    "train_pnl": 360680,
+    "train_max_dd": 5.0,
+    "train_pf": 10.6,
+    "test_period": "Jul-Dec 2024",
+    "test_trades": 181,
+    "test_win_rate": 81.2,
+    "test_pnl": 934080,
+    "test_max_dd": 7.1,
+    "test_pf": 18.0,
+    "oos_2025_trades": 392,
+    "oos_2025_win_rate": 84.4,
+    "oos_2025_pnl": 2296010,
+    "oos_2025_max_dd": 4.4,
+    "oos_2025_pf": 23.5,
+    "optimization_date": "2026-01-18"
+  },
+  "strategy_notes": {
+    "window": "10:00-11:00 (1 hour only) - best risk-adjusted returns",
+    "option_price": "$0.50-$1.00 - cheap options with high gamma",
+    "hold_time": "87% of trades close in 5 minutes (1 bar)",
+    "exit_rules": "22% profit target, 25% stop loss, 5 min max hold",
+    "risk_mgmt": "Stop after first daily loss to prevent compounding losses"
+  }
+}

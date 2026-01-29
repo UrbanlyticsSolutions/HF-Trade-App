@@ -1,0 +1,48 @@
+{
+  "initial_capital": 10000.0,
+  "current_capital": 10049.0,
+  "high_water_mark": 10165.0,
+  "total_trades": 4,
+  "total_wins": 3,
+  "total_losses": 1,
+  "total_pnl": 49.0,
+  "max_drawdown": 0.0114,
+  "equity_curve": [
+    {
+      "trade_id": 0,
+      "type": "-",
+      "equity": 10000.0,
+      "pnl": 0
+    },
+    {
+      "trade_id": 1,
+      "type": "PUT",
+      "equity": 10050.0,
+      "pnl": 50.0,
+      "time": "2026-01-28T13:10:37.465795-05:00"
+    },
+    {
+      "trade_id": 2,
+      "type": "PUT",
+      "equity": 10110.0,
+      "pnl": 60.0,
+      "time": "2026-01-28T13:17:00.865168-05:00"
+    },
+    {
+      "trade_id": 12,
+      "type": "PUT",
+      "equity": 10165.0,
+      "pnl": 55.0,
+      "time": "2026-01-28T14:43:40.885715-05:00"
+    },
+    {
+      "trade_id": 14,
+      "type": "PUT",
+      "equity": 10049.0,
+      "pnl": -116.0,
+      "time": "2026-01-28T14:48:16.855862-05:00"
+    }
+  ],
+  "engine_status": "sleep",
+  "last_updated": "2026-01-28T16:35:38.184993"
+}
