@@ -541,18 +541,67 @@ app.index_string = '''
 <html>
     <head>
         {%metas%}
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
         <style>
+            * {
+                box-sizing: border-box;
+            }
             body {
                 background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 margin: 0;
                 min-height: 100vh;
+                -webkit-text-size-adjust: 100%;
             }
             .dash-table-container {
                 background: rgba(255,255,255,0.05) !important;
+            }
+            /* Mobile responsive styles */
+            @media (max-width: 768px) {
+                .stats-row {
+                    flex-direction: column !important;
+                    gap: 10px !important;
+                }
+                .stats-card {
+                    padding: 15px !important;
+                }
+                .stats-card-value {
+                    font-size: 1.5em !important;
+                }
+                .charts-row {
+                    flex-direction: column !important;
+                }
+                .chart-container {
+                    min-height: 250px !important;
+                }
+                .header-title {
+                    font-size: 1.5em !important;
+                }
+                .status-bar {
+                    flex-direction: column !important;
+                    align-items: flex-start !important;
+                    gap: 5px !important;
+                }
+                .main-container {
+                    padding: 10px !important;
+                }
+                .section-container {
+                    padding: 15px !important;
+                }
+                .log-container {
+                    max-height: 200px !important;
+                }
+            }
+            @media (max-width: 480px) {
+                .stats-card-value {
+                    font-size: 1.3em !important;
+                }
+                .header-title {
+                    font-size: 1.2em !important;
+                }
             }
         </style>
     </head>
@@ -599,14 +648,14 @@ def serve_layout():
                 pnl_display = f'-${abs(pnl):.0f} ({pnl_pct:.1f}%)'
             
             table_data.append({
-                'Symbol': t.get('symbol', ''),
-                'Type': str(t.get('option_type', '')).upper(),
+                'Symbol': t.get('symbol', '')[-15:],  # Truncate for mobile
+                'Type': str(t.get('option_type', '')).upper()[:4],
                 'Qty': t.get('quantity', 0),
                 'Entry': f"${t.get('entry_price', 0):.2f}",
                 'Exit': f"${t.get('exit_price', 0):.2f}" if t.get('exit_price') else '-',
                 'P&L': pnl_display,
-                'Entry Time': str(t.get('entry_time', ''))[:19],
-                'Status': status.upper()
+                'Time': str(t.get('entry_time', ''))[11:16],  # Just HH:MM
+                'Status': status.upper()[:4]
             })
     
     # Get system status
@@ -626,7 +675,7 @@ def serve_layout():
     return html.Div([
         # Header
         html.Div([
-            html.H1("0DTE Trading Dashboard", style={
+            html.H1("0DTE Trading Dashboard", className='header-title', style={
                 'background': 'linear-gradient(90deg, #00d9ff, #00ff88)',
                 'WebkitBackgroundClip': 'text',
                 'WebkitTextFillColor': 'transparent',
@@ -638,31 +687,32 @@ def serve_layout():
                 'color': '#000',
                 'padding': '5px 15px',
                 'borderRadius': '20px',
-                'fontWeight': 'bold'
+                'fontWeight': 'bold',
+                'fontSize': '0.8em'
             })
-        ], style={'textAlign': 'center', 'padding': '20px', 'marginBottom': '20px'}),
+        ], style={'textAlign': 'center', 'padding': '15px', 'marginBottom': '15px'}),
         
         # System Status Bar
         html.Div([
-            html.Div(id='status-bar'),
+            html.Div(id='status-bar', className='status-bar'),
             html.Div([
-                html.Button("🔄 Restart Engine", id='restart-btn', n_clicks=0, style={
+                html.Button("🔄 Restart", id='restart-btn', n_clicks=0, style={
                     'background': 'linear-gradient(90deg, #ff4757, #ff6b81)',
                     'color': '#fff',
                     'border': 'none',
-                    'padding': '8px 20px',
+                    'padding': '8px 15px',
                     'borderRadius': '20px',
                     'cursor': 'pointer',
                     'fontWeight': 'bold',
-                    'marginLeft': '20px'
+                    'fontSize': '0.9em'
                 }),
-                html.Span(id='restart-status', style={'marginLeft': '10px'})
-            ], style={'marginTop': '10px', 'display': 'flex', 'alignItems': 'center'})
-        ], style={
+                html.Span(id='restart-status', style={'marginLeft': '10px', 'fontSize': '0.85em'})
+            ], style={'marginTop': '10px', 'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap'})
+        ], className='section-container', style={
             'background': 'rgba(255,255,255,0.05)',
             'borderRadius': '10px',
-            'padding': '15px 20px',
-            'marginBottom': '20px',
+            'padding': '12px 15px',
+            'marginBottom': '15px',
             'border': '1px solid rgba(255,255,255,0.1)'
         }),
         
@@ -670,83 +720,88 @@ def serve_layout():
         html.Div([
             # Today's P&L
             html.Div([
-                html.Div("TODAY'S P&L", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
-                html.Div(id='today-pnl-value', style={'fontSize': '2em', 'fontWeight': 'bold'}),
+                html.Div("TODAY", style={'color': '#888', 'fontSize': '0.75em', 'marginBottom': '3px'}),
+                html.Div(id='today-pnl-value', className='stats-card-value', style={'fontSize': '1.8em', 'fontWeight': 'bold'}),
                 html.Div(id='today-pnl-dots')
-            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+            ], className='stats-card', style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '12px', 'padding': '15px', 'textAlign': 'center', 'flex': '1', 'minWidth': '100px'}),
             
             # Total P&L
             html.Div([
-                html.Div("TOTAL P&L", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
-                html.Div(id='total-pnl-value', style={'fontSize': '2em', 'fontWeight': 'bold'})
-            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+                html.Div("TOTAL P&L", style={'color': '#888', 'fontSize': '0.75em', 'marginBottom': '3px'}),
+                html.Div(id='total-pnl-value', className='stats-card-value', style={'fontSize': '1.8em', 'fontWeight': 'bold'})
+            ], className='stats-card', style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '12px', 'padding': '15px', 'textAlign': 'center', 'flex': '1', 'minWidth': '100px'}),
             
             # Current Capital
             html.Div([
-                html.Div("CURRENT CAPITAL", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
-                html.Div(id='current-capital-value', style={'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00d9ff'})
-            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+                html.Div("CAPITAL", style={'color': '#888', 'fontSize': '0.75em', 'marginBottom': '3px'}),
+                html.Div(id='current-capital-value', className='stats-card-value', style={'fontSize': '1.8em', 'fontWeight': 'bold', 'color': '#00d9ff'})
+            ], className='stats-card', style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '12px', 'padding': '15px', 'textAlign': 'center', 'flex': '1', 'minWidth': '100px'}),
             
             # Total Return
             html.Div([
-                html.Div("TOTAL RETURN", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
-                html.Div(id='total-return-value', style={'fontSize': '2em', 'fontWeight': 'bold'})
-            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+                html.Div("RETURN", style={'color': '#888', 'fontSize': '0.75em', 'marginBottom': '3px'}),
+                html.Div(id='total-return-value', className='stats-card-value', style={'fontSize': '1.8em', 'fontWeight': 'bold'})
+            ], className='stats-card', style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '12px', 'padding': '15px', 'textAlign': 'center', 'flex': '1', 'minWidth': '100px'}),
             
             # Win Rate
             html.Div([
-                html.Div("WIN RATE", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
-                html.Div(id='win-rate-value', style={'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00d9ff'})
-            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+                html.Div("WIN RATE", style={'color': '#888', 'fontSize': '0.75em', 'marginBottom': '3px'}),
+                html.Div(id='win-rate-value', className='stats-card-value', style={'fontSize': '1.8em', 'fontWeight': 'bold', 'color': '#00d9ff'})
+            ], className='stats-card', style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '12px', 'padding': '15px', 'textAlign': 'center', 'flex': '1', 'minWidth': '100px'}),
             
             # Max Drawdown
             html.Div([
-                html.Div("MAX DRAWDOWN", style={'color': '#888', 'fontSize': '0.85em', 'marginBottom': '5px'}),
-                html.Div(id='max-drawdown-value', style={'fontSize': '2em', 'fontWeight': 'bold', 'color': '#ff4757'})
-            ], style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '15px', 'padding': '25px', 'textAlign': 'center', 'flex': '1'}),
+                html.Div("DRAWDOWN", style={'color': '#888', 'fontSize': '0.75em', 'marginBottom': '3px'}),
+                html.Div(id='max-drawdown-value', className='stats-card-value', style={'fontSize': '1.8em', 'fontWeight': 'bold', 'color': '#ff4757'})
+            ], className='stats-card', style={'background': 'rgba(255,255,255,0.08)', 'borderRadius': '12px', 'padding': '15px', 'textAlign': 'center', 'flex': '1', 'minWidth': '100px'}),
             
-        ], style={'display': 'flex', 'gap': '20px', 'marginBottom': '30px', 'flexWrap': 'wrap'}),
+        ], className='stats-row', style={'display': 'flex', 'gap': '10px', 'marginBottom': '15px', 'flexWrap': 'wrap'}),
         
         # Charts Row
         html.Div([
             html.Div([
-                dcc.Graph(id='equity-chart', config={'displayModeBar': False})
-            ], style={'flex': '2', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '10px'}),
+                dcc.Graph(id='equity-chart', config={'displayModeBar': False}, style={'height': '300px'})
+            ], className='chart-container', style={'flex': '2', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '8px', 'minWidth': '280px'}),
             
             html.Div([
-                dcc.Graph(id='pnl-chart', config={'displayModeBar': False})
-            ], style={'flex': '1', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '10px'}),
-        ], style={'display': 'flex', 'gap': '20px', 'marginBottom': '30px'}),
-        
-        # Gauge Row (removed for simplicity)
+                dcc.Graph(id='pnl-chart', config={'displayModeBar': False}, style={'height': '300px'})
+            ], className='chart-container', style={'flex': '1', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '8px', 'minWidth': '280px'}),
+        ], className='charts-row', style={'display': 'flex', 'gap': '10px', 'marginBottom': '15px', 'flexWrap': 'wrap'}),
         
         # Trades Table
         html.Div([
             html.H2(f"Today's Trades ({date.today().isoformat()})", style={
                 'color': '#eee',
-                'fontSize': '1.3em',
-                'marginBottom': '15px',
-                'borderLeft': '4px solid #00d9ff',
-                'paddingLeft': '15px'
+                'fontSize': '1.1em',
+                'marginBottom': '10px',
+                'borderLeft': '3px solid #00d9ff',
+                'paddingLeft': '10px'
             }),
             dash_table.DataTable(
                 id='trades-table',
-                columns=[{'name': col, 'id': col} for col in ['Symbol', 'Type', 'Qty', 'Entry', 'Exit', 'P&L', 'Entry Time', 'Status']],
+                columns=[{'name': col, 'id': col} for col in ['Symbol', 'Type', 'Qty', 'Entry', 'Exit', 'P&L', 'Time', 'Status']],
                 data=[],
                 style_header={
                     'backgroundColor': 'rgba(0,217,255,0.2)',
                     'color': '#eee',
                     'fontWeight': 'bold',
                     'border': 'none',
-                    'borderBottom': '2px solid rgba(0,217,255,0.3)'
+                    'borderBottom': '2px solid rgba(0,217,255,0.3)',
+                    'fontSize': '0.8em',
+                    'padding': '8px 5px'
                 },
                 style_cell={
                     'backgroundColor': 'transparent',
                     'color': '#eee',
                     'border': 'none',
                     'borderBottom': '1px solid rgba(255,255,255,0.1)',
-                    'padding': '12px 15px',
-                    'textAlign': 'left'
+                    'padding': '8px 5px',
+                    'textAlign': 'left',
+                    'fontSize': '0.8em',
+                    'minWidth': '50px',
+                    'maxWidth': '150px',
+                    'overflow': 'hidden',
+                    'textOverflow': 'ellipsis'
                 },
                 style_data_conditional=[
                     {'if': {'filter_query': '{P&L} contains "+"'}, 'color': '#00ff88', 'fontWeight': 'bold'},
@@ -755,32 +810,32 @@ def serve_layout():
                 ],
                 style_table={'overflowX': 'auto'}
             )
-        ], style={'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '25px', 'marginBottom': '20px'}),
+        ], className='section-container', style={'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '15px', 'marginBottom': '15px'}),
         
         # Backend Terminal Output
         html.Div([
-            html.H2("Backend Terminal Output", style={
+            html.H2("Backend Logs", style={
                 'color': '#eee',
-                'fontSize': '1.3em',
-                'marginBottom': '15px',
-                'borderLeft': '4px solid #ffa500',
-                'paddingLeft': '15px'
+                'fontSize': '1.1em',
+                'marginBottom': '10px',
+                'borderLeft': '3px solid #ffa500',
+                'paddingLeft': '10px'
             }),
             html.Div([
                 html.Div(id='log-output')
-            ], style={
+            ], className='log-container', style={
                 'background': 'rgba(0,0,0,0.3)',
                 'borderRadius': '8px',
-                'maxHeight': '400px',
+                'maxHeight': '300px',
                 'overflowY': 'auto',
                 'overflowX': 'hidden',
-                'padding': '10px'
+                'padding': '8px'
             })
-        ], style={'background': 'rgba(255,255,255,0.05)', 'borderRadius': '15px', 'padding': '25px', 'marginBottom': '20px'}),
+        ], className='section-container', style={'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '15px', 'marginBottom': '15px'}),
         
         # Timestamp
         html.Div(id='timestamp-display', 
-                style={'textAlign': 'center', 'color': '#666', 'fontSize': '0.85em'}),
+                style={'textAlign': 'center', 'color': '#666', 'fontSize': '0.75em', 'padding': '10px'}),
         
         # Auto-refresh interval (3 seconds for real-time)
         dcc.Interval(id='interval-component', interval=3*1000, n_intervals=0),
@@ -788,7 +843,7 @@ def serve_layout():
         # Store for restart signal
         dcc.Store(id='restart-signal', data=0)
         
-    ], style={'maxWidth': '1400px', 'margin': '0 auto', 'padding': '20px', 'color': '#eee'})
+    ], className='main-container', style={'maxWidth': '1400px', 'margin': '0 auto', 'padding': '10px', 'color': '#eee'})
 
 
 app.layout = serve_layout
@@ -935,14 +990,14 @@ def update_dashboard(n):
             else:
                 pnl_display = f'-${abs(pnl):.0f} ({pnl_pct:.1f}%)'
             table_data.append({
-                'Symbol': symbol,
-                'Type': opt_type,
+                'Symbol': symbol[-15:],  # Truncate for mobile
+                'Type': opt_type[:4],
                 'Qty': t.get('quantity', 0),
                 'Entry': f"${t.get('entry_price', 0):.2f}",
                 'Exit': f"${t.get('exit_price', 0):.2f}" if t.get('exit_price') else '-',
                 'P&L': pnl_display,
-                'Entry Time': str(t.get('entry_time', ''))[:19],
-                'Status': status.upper()
+                'Time': str(t.get('entry_time', ''))[11:16],  # Just HH:MM
+                'Status': status.upper()[:4]
             })
     
     # Charts - use state for equity curve and P&L bars
