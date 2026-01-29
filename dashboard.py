@@ -10,6 +10,7 @@ import sqlite3
 import os
 from datetime import datetime, date
 from pathlib import Path
+from functools import wraps
 
 import pandas as pd
 import plotly.express as px
@@ -19,6 +20,38 @@ from dash.exceptions import PreventUpdate
 from plotly.subplots import make_subplots
 import subprocess
 import signal
+from flask import request, Response
+
+# ============================================================
+# AUTHENTICATION
+# ============================================================
+DASHBOARD_USERNAME = "realericzhu@gmail.com"
+DASHBOARD_PASSWORD = "admin"
+
+
+def check_auth(username, password):
+    """Check if username/password combo is valid."""
+    return username == DASHBOARD_USERNAME and password == DASHBOARD_PASSWORD
+
+
+def authenticate():
+    """Send 401 response to enable basic auth."""
+    return Response(
+        'Login required. Enter your credentials.',
+        401,
+        {'WWW-Authenticate': 'Basic realm="Trading Dashboard"'}
+    )
+
+
+def requires_auth(f):
+    """Decorator for routes that require authentication."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
 
 # Process tracking for restart functionality
 ENGINE_PROCESS = None
@@ -493,6 +526,14 @@ def create_today_pnl_indicator(today_pnl):
 
 app = Dash(__name__)
 app.title = "0DTE Trading Dashboard"
+
+# Apply HTTP Basic Auth to all routes
+@app.server.before_request
+def protect_dashboards():
+    """Require authentication for all dashboard routes."""
+    auth = request.authorization
+    if not auth or not check_auth(auth.username, auth.password):
+        return authenticate()
 
 # Custom CSS
 app.index_string = '''
