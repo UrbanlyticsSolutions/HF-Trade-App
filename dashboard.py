@@ -8,9 +8,10 @@ Usage:
 import json
 import sqlite3
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -21,6 +22,11 @@ from plotly.subplots import make_subplots
 import subprocess
 import signal
 from flask import request, Response
+
+# Timezone definitions
+TZ_ET = ZoneInfo("America/New_York")
+TZ_PST = ZoneInfo("America/Los_Angeles")
+TZ_UTC = ZoneInfo("UTC")
 
 # ============================================================
 # AUTHENTICATION
@@ -215,21 +221,71 @@ def get_recent_logs(num_lines=50):
 # DATA LOADING
 # ============================================================
 
+def get_db_stats():
+    """Get stats directly from database (source of truth)."""
+    db_path = Path(__file__).parent / "data" / "live_0dte_trades.db"
+    if not db_path.exists():
+        return None
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # Get aggregate stats from closed trades
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_trades,
+                COUNT(CASE WHEN pnl > 0 THEN 1 END) as wins,
+                COUNT(CASE WHEN pnl <= 0 THEN 1 END) as losses,
+                COALESCE(SUM(pnl), 0) as total_pnl
+            FROM trades 
+            WHERE status = 'closed' AND pnl IS NOT NULL
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                "total_trades": row[0] or 0,
+                "total_wins": row[1] or 0,
+                "total_losses": row[2] or 0,
+                "total_pnl": row[3] or 0.0
+            }
+    except Exception as e:
+        pass
+    
+    return None
+
+
 def get_state():
-    """Load trading state from JSON file."""
+    """Load trading state from JSON file, synced with DB stats."""
     state_path = Path(__file__).parent / "trading_state.json"
-    if state_path.exists():
-        with open(state_path) as f:
-            return json.load(f)
-    return {
+    state = {
         "initial_capital": 10000,
         "current_capital": 10000,
         "total_pnl": 0,
         "total_trades": 0,
         "total_wins": 0,
         "total_losses": 0,
-        "max_drawdown": 0
+        "max_drawdown": 0,
+        "equity_curve": [],
+        "engine_status": "unknown"
     }
+    
+    if state_path.exists():
+        with open(state_path) as f:
+            state.update(json.load(f))
+    
+    # Sync with DB stats (DB is source of truth for trade counts)
+    db_stats = get_db_stats()
+    if db_stats:
+        state["total_trades"] = db_stats["total_trades"]
+        state["total_wins"] = db_stats["total_wins"]
+        state["total_losses"] = db_stats["total_losses"]
+        state["total_pnl"] = db_stats["total_pnl"]
+        state["current_capital"] = state["initial_capital"] + db_stats["total_pnl"]
+    
+    return state
 
 
 def get_trades_df():
@@ -274,12 +330,44 @@ def get_option_type_from_symbol(symbol):
 
 
 def create_equity_curve(state, initial_capital=10000):
-    """Create equity curve chart from state JSON."""
+    """Create equity curve chart from state JSON or DB."""
     equity_curve = state.get('equity_curve', [])
+    
+    # If no equity curve in state, build from DB
+    if not equity_curve or len(equity_curve) < 2:
+        db_path = Path(__file__).parent / "data" / "live_0dte_trades.db"
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, symbol, pnl, exit_time 
+                    FROM trades 
+                    WHERE status = 'closed' AND pnl IS NOT NULL 
+                    ORDER BY exit_time
+                """)
+                trades = cursor.fetchall()
+                conn.close()
+                
+                if trades:
+                    equity_curve = [{"trade_id": 0, "type": "-", "equity": initial_capital, "pnl": 0}]
+                    running_capital = initial_capital
+                    for trade_id, symbol, pnl, exit_time in trades:
+                        running_capital += pnl
+                        opt_type = get_option_type_from_symbol(symbol)
+                        equity_curve.append({
+                            "trade_id": trade_id,
+                            "type": opt_type,
+                            "equity": running_capital,
+                            "pnl": pnl,
+                            "time": exit_time
+                        })
+            except Exception as e:
+                pass
     
     if not equity_curve or len(equity_curve) < 2:
         fig = go.Figure()
-        fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(color='#888'))
     else:
         # Build equity curve from state
         equities = [point.get('equity', initial_capital) for point in equity_curve]
@@ -404,7 +492,8 @@ def create_equity_curve(state, initial_capital=10000):
                 spikedash='dot',
                 spikemode='across'
             ),
-            hovermode='x unified'
+            hovermode='x unified',
+            height=280
         )
         return fig
     
@@ -414,22 +503,52 @@ def create_equity_curve(state, initial_capital=10000):
         template="plotly_dark",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=20, r=20, t=50, b=20)
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=280
     )
     return fig
 
 
 def create_pnl_bars(state):
-    """Create P&L bar chart by trade from state."""
+    """Create P&L bar chart by trade from state or DB."""
     equity_curve = state.get('equity_curve', [])
     
     # Skip first entry (initial capital with pnl=0)
     trades = [t for t in equity_curve if t.get('trade_id', 0) > 0]
-    trades = trades[-20:]  # Last 20
+    
+    # If no trades from state, get from DB
+    if not trades:
+        db_path = Path(__file__).parent / "data" / "live_0dte_trades.db"
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, symbol, pnl 
+                    FROM trades 
+                    WHERE status = 'closed' AND pnl IS NOT NULL 
+                    ORDER BY exit_time DESC
+                    LIMIT 20
+                """)
+                db_trades = cursor.fetchall()
+                conn.close()
+                
+                trades = []
+                for trade_id, symbol, pnl in reversed(db_trades):
+                    opt_type = get_option_type_from_symbol(symbol)
+                    trades.append({
+                        "trade_id": trade_id,
+                        "type": opt_type,
+                        "pnl": pnl
+                    })
+            except:
+                pass
+    else:
+        trades = trades[-20:]  # Last 20
     
     if not trades:
         fig = go.Figure()
-        fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(color='#888'))
     else:
         pnls = [t.get('pnl', 0) for t in trades]
         types = [t.get('type', '-') for t in trades]
@@ -450,15 +569,16 @@ def create_pnl_bars(state):
         ))
     
     fig.update_layout(
-        title="Trade P&L (Last 20)",
+        title="Trade P&L",
         template="plotly_dark",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=20, r=20, t=50, b=20),
-        xaxis_title="Trade #",
-        yaxis_title="P&L ($)",
+        margin=dict(l=40, r=20, t=40, b=30),
+        xaxis_title="",
+        yaxis_title="",
         yaxis_tickprefix="$",
-        showlegend=False
+        showlegend=False,
+        height=280
     )
     return fig
 
@@ -908,13 +1028,19 @@ def update_dashboard(n):
     total_return_style = {'fontSize': '2em', 'fontWeight': 'bold', 'color': '#00ff88' if total_return >= 0 else '#ff4757'}
     
     # Win Rate
-    win_rate_text = f"{state.get('total_wins', 0)}/{state.get('total_trades', 0)}"
+    total_trades = state.get('total_trades', 0)
+    total_wins = state.get('total_wins', 0)
+    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+    win_rate_text = f"{total_wins}/{total_trades} ({win_rate:.0f}%)"
     
     # Max Drawdown
     max_dd_text = f"{state.get('max_drawdown', 0)*100:.1f}%"
     
-    # Timestamp
-    timestamp = f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Auto-refresh: 3s"
+    # Timestamp with ET and PST
+    now_utc = datetime.now(TZ_UTC)
+    now_et = now_utc.astimezone(TZ_ET)
+    now_pst = now_utc.astimezone(TZ_PST)
+    timestamp = f"ET: {now_et.strftime('%H:%M:%S')} | PST: {now_pst.strftime('%H:%M:%S')} | {now_et.strftime('%Y-%m-%d')}"
     
     # System Status Bar
     sys_status = get_system_status()
