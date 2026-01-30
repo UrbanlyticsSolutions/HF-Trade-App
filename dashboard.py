@@ -175,46 +175,70 @@ def get_system_status():
     return status
 
 
-def get_recent_logs(num_lines=50):
-    """Get recent log entries from terminal output file."""
-    # Primary: Read from terminal_output.log (live backend output)
-    terminal_log = Path(__file__).parent / "logs" / "terminal_output.log"
-    # Fallback: Trading log file
-    trading_log = Path(__file__).parent / "logs" / f"live_0dte_{date.today().strftime('%Y%m%d')}.log"
-    
+def get_recent_logs(num_lines=100):
+    """Get recent log entries from journalctl (systemd) or local files."""
     lines_out = []
     
-    # Try terminal output first (this has live backend output)
-    if terminal_log.exists():
-        try:
-            with open(terminal_log, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            for line in lines[-num_lines:]:
-                line = line.strip()
-                if line and len(line) > 150:
-                    line = line[:150] + '...'
+    # Primary: Try journalctl for systemd service logs (VM deployment)
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "trading-engine", "-n", str(num_lines), "--no-pager", "--output=short"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split('\n'):
+                # Clean up the log line - remove the systemd prefix
+                if 'python[' in line:
+                    # Extract just the log message after the process info
+                    parts = line.split(':', 3)
+                    if len(parts) >= 4:
+                        line = parts[3].strip()
+                    else:
+                        line = line.strip()
+                if line and len(line) > 200:
+                    line = line[:200] + '...'
                 if line:
                     lines_out.append(line)
-        except:
-            pass
+    except Exception as e:
+        pass
     
-    # If no terminal output, fall back to trading log
-    if not lines_out and trading_log.exists():
-        try:
-            with open(trading_log, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            for line in lines[-num_lines:]:
-                line = line.strip()
-                if line and len(line) > 150:
-                    line = line[:150] + '...'
-                if line:
-                    lines_out.append(line)
-        except:
-            pass
+    # Fallback 1: Read from terminal_output.log (live backend output)
+    if not lines_out:
+        terminal_log = Path(__file__).parent / "logs" / "terminal_output.log"
+        if terminal_log.exists():
+            try:
+                with open(terminal_log, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+                for line in lines[-num_lines:]:
+                    line = line.strip()
+                    if line and len(line) > 200:
+                        line = line[:200] + '...'
+                    if line:
+                        lines_out.append(line)
+            except:
+                pass
+    
+    # Fallback 2: Trading log file
+    if not lines_out:
+        trading_log = Path(__file__).parent / "logs" / f"live_0dte_{date.today().strftime('%Y%m%d')}.log"
+        if trading_log.exists():
+            try:
+                with open(trading_log, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+                for line in lines[-num_lines:]:
+                    line = line.strip()
+                    if line and len(line) > 200:
+                        line = line[:200] + '...'
+                    if line:
+                        lines_out.append(line)
+            except:
+                pass
     
     # Reverse for most recent first
     lines_out.reverse()
-    return lines_out if lines_out else ["No log output available - start the engine with start.py"]
+    return lines_out if lines_out else ["No log output available - engine may not be running"]
 
 
 # ============================================================
