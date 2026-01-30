@@ -1045,34 +1045,50 @@ def update_dashboard(n):
     # System Status Bar
     sys_status = get_system_status()
     def get_status_color(status_text):
-        if status_text in ['Valid', 'Running', 'OK', 'live'] or (isinstance(status_text, str) and status_text.startswith('OK')):
+        if status_text in ['Valid', 'Running', 'OK', 'live', 'starting'] or (isinstance(status_text, str) and status_text.startswith('OK')):
             return '#00ff88'
-        elif status_text in ['Expired', 'Error', 'Missing', 'Stale']:
+        elif status_text in ['Expired', 'Error', 'Missing', 'Stale', 'error', 'stopped']:
             return '#ff4757'
         elif status_text in ['Slow', 'Unknown', 'sleep', 'unknown']:
             return '#ffa500'
         return '#00d9ff'
     
+    # Build engine status text with extra info
+    engine_status = state.get('engine_status', 'unknown')
+    engine_info = ""
+    if engine_status == 'sleep':
+        opens_in = state.get('engine_opens_in', '')
+        if opens_in:
+            engine_info = f" (opens in {opens_in})"
+    elif engine_status == 'live':
+        mode = state.get('engine_mode', '')
+        strategy = state.get('engine_strategy', '')
+        if mode or strategy:
+            engine_info = f" ({mode}/{strategy})"
+    elif engine_status == 'error':
+        engine_info = f" ({state.get('engine_error_message', 'unknown')[:30]})"
+    
     status_bar = html.Div([
-        html.Span("SYSTEM STATUS", style={'color': '#888', 'fontSize': '0.8em', 'marginRight': '20px'}),
+        html.Span("ENGINE", style={'color': '#888', 'fontSize': '0.75em', 'marginRight': '10px'}),
         html.Span([
-            html.Span("Engine: ", style={'color': '#888'}),
-            html.Span(state.get('engine_status', 'unknown'), style={'color': get_status_color(state.get('engine_status', 'unknown')), 'fontWeight': 'bold'})
-        ], style={'marginRight': '20px'}),
+            html.Span(engine_status.upper(), style={'color': get_status_color(engine_status), 'fontWeight': 'bold'}),
+            html.Span(engine_info, style={'color': '#888', 'fontSize': '0.85em'})
+        ], style={'marginRight': '15px'}),
         html.Span([
-            html.Span("Token: ", style={'color': '#888'}),
-            html.Span(sys_status['token_status'], style={'color': get_status_color(sys_status['token_status']), 'fontWeight': 'bold'}),
-            html.Span(f" (expires {sys_status['token_expires']})" if sys_status['token_expires'] else "", style={'color': '#666', 'fontSize': '0.9em'})
-        ], style={'marginRight': '20px'}),
+            html.Span("Token: ", style={'color': '#888', 'fontSize': '0.85em'}),
+            html.Span(sys_status['token_status'], style={'color': get_status_color(sys_status['token_status']), 'fontWeight': 'bold', 'fontSize': '0.85em'})
+        ], style={'marginRight': '15px'}),
         html.Span([
-            html.Span("DB: ", style={'color': '#888'}),
-            html.Span(sys_status['db_status'], style={'color': get_status_color(sys_status['db_status']), 'fontWeight': 'bold'})
-        ], style={'marginRight': '20px'}),
+            html.Span("DB: ", style={'color': '#888', 'fontSize': '0.85em'}),
+            html.Span(sys_status['db_status'].split('(')[0].strip(), style={'color': get_status_color(sys_status['db_status']), 'fontWeight': 'bold', 'fontSize': '0.85em'})
+        ], style={'marginRight': '15px'}),
         html.Span([
-            html.Span("Last: ", style={'color': '#888'}),
-            html.Span(sys_status.get('last_quote_time', 'N/A'), style={'color': '#00d9ff'})
+            html.Span("Market: ", style={'color': '#888', 'fontSize': '0.85em'}),
+            html.Span("OPEN" if (9 <= now_et.hour < 16 and now_et.weekday() < 5) else "CLOSED", 
+                     style={'color': '#00ff88' if (9 <= now_et.hour < 16 and now_et.weekday() < 5) else '#ff4757', 
+                            'fontWeight': 'bold', 'fontSize': '0.85em'})
         ])
-    ], style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '10px'})
+    ], className='status-bar', style={'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '8px'})
     
     # Log Output
     log_lines = get_recent_logs(50)

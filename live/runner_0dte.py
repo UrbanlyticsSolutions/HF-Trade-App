@@ -89,8 +89,36 @@ def get_seconds_until_market_open() -> int:
     return max(0, int(seconds_until))
 
 
+def update_engine_status(status: str, extra_info: dict = None):
+    """Update engine status in trading_state.json for dashboard display."""
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    state_file = os.path.join(project_dir, 'trading_state.json')
+    
+    try:
+        import json
+        state = {}
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+        
+        # Update engine status fields
+        state['engine_status'] = status
+        state['engine_last_update'] = datetime.now().isoformat()
+        
+        if extra_info:
+            for k, v in extra_info.items():
+                state[f'engine_{k}'] = v
+        
+        with open(state_file, 'w') as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.debug(f"Failed to update engine status: {e}")
+
+
 def wait_for_market_open():
     """Sleep until market is about to open, with periodic status updates."""
+    update_engine_status("sleep", {"waiting_for": "market_open"})
+    
     while not is_trading_day() or get_eastern_time().time() < MARKET_OPEN:
         now_et = get_eastern_time()
         seconds_until = get_seconds_until_market_open()
@@ -112,11 +140,15 @@ def wait_for_market_open():
         logger.info(f"Market closed. Current time: {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}. "
                     f"Opens in: {wait_str}. Sleeping...")
         
+        # Update status with wait time
+        update_engine_status("sleep", {"opens_in": wait_str, "current_time_et": now_et.strftime('%H:%M:%S')})
+        
         # Sleep in chunks (max 5 minutes) to allow for interrupts and status updates
         sleep_duration = min(seconds_until, 300)  # 5 minute max sleep
         time.sleep(sleep_duration)
     
     logger.info(f"Market is open! Time: {get_eastern_time().strftime('%H:%M:%S %Z')}")
+    update_engine_status("starting", {"current_time_et": get_eastern_time().strftime('%H:%M:%S')})
 
 
 def main():
@@ -260,12 +292,20 @@ def main():
         
         # Run engine
         logger.info("Starting engine... Press Ctrl+C to stop")
+        update_engine_status("live", {
+            "mode": args.mode,
+            "strategy": args.strategy,
+            "capital": args.capital,
+            "started_at": get_eastern_time().strftime('%H:%M:%S')
+        })
         engine.run()
         
     except KeyboardInterrupt:
         logger.info("Shutting down...")
+        update_engine_status("stopped", {"reason": "user_interrupt"})
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        update_engine_status("error", {"error_message": str(e)[:100]})
         sys.exit(1)
 
 
