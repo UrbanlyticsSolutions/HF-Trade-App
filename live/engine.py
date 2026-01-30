@@ -484,18 +484,47 @@ class LiveTradingEngine:
         
         # Log to database with [PAPER] tag
         if self.db:
-            from live.trade_database import Trade
-            trade = Trade(
-                symbol=signal.symbol,
-                action=signal.action,
-                quantity=signal.quantity,
-                entry_price=fill_price,
-                entry_time=get_eastern_time().isoformat(),
-                strategy_name=signal.strategy_name,
-                notes=f"[PAPER] {signal.reason}",
-                status="open"
-            )
-            self.db.insert_trade(trade)
+            if signal.action == "BUY":
+                # New position - insert trade
+                from live.trade_database import Trade
+                
+                # Parse option type from symbol (e.g., SPY30Jan26P689.00 -> put)
+                option_type = None
+                if "C" in signal.symbol and signal.symbol.split("C")[-1].replace(".", "").isdigit():
+                    option_type = "call"
+                elif "P" in signal.symbol and signal.symbol.split("P")[-1].replace(".", "").isdigit():
+                    option_type = "put"
+                
+                trade = Trade(
+                    symbol=signal.symbol,
+                    action=signal.action,
+                    quantity=signal.quantity,
+                    entry_price=fill_price,
+                    entry_time=get_eastern_time().isoformat(),
+                    strategy_name=signal.strategy_name,
+                    option_type=option_type,
+                    notes=f"[PAPER] {signal.reason}",
+                    status="open"
+                )
+                self.db.insert_trade(trade)
+            elif signal.action == "SELL":
+                # Close existing position - find open trade and update it
+                open_trades = self.db.get_open_trades()
+                matching_trade = None
+                for t in open_trades:
+                    if t['symbol'] == signal.symbol and t['action'] == 'BUY':
+                        matching_trade = t
+                        break
+                
+                if matching_trade:
+                    self.db.close_trade(
+                        trade_id=matching_trade['id'],
+                        exit_price=fill_price,
+                        exit_time=get_eastern_time().isoformat(),
+                        notes=f"[PAPER] {signal.reason}"
+                    )
+                else:
+                    logger.warning(f"[PAPER] No open trade found for SELL: {signal.symbol}")
     
     def _is_market_open(self) -> bool:
         """Check if market is currently open"""
