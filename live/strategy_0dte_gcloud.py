@@ -110,7 +110,7 @@ class Live0DTEStrategy(OptionStrategy):
         stop_loss_pct: float = 0.25,
         min_option_price: float = 0.50,
         max_option_price: float = 1.00,
-        # Trading window (ET times) - backtest optimal: 10:00-11:00
+        # Trading window (ET times)
         trade_start_hour: int = 10,
         trade_start_minute: int = 0,
         trade_end_hour: int = 11,
@@ -201,14 +201,6 @@ class Live0DTEStrategy(OptionStrategy):
         self.trade_state = TradeState()
         self.day_state = DayState()
         
-        # Signal cooldown - prevent re-entry too quickly after exit
-        self._last_exit_time = None
-        self._signal_cooldown_seconds = 60  # Wait 60s after exit before new entry
-        
-        # Pending signal expiry
-        self._pending_direction_time = None
-        self._pending_expiry_seconds = 30  # Pending signals expire after 30s
-        
         # Price history for indicators
         self._price_history: List[Dict] = []
         self._rsi_period = 14
@@ -216,11 +208,8 @@ class Live0DTEStrategy(OptionStrategy):
         logger.info(f"Live0DTE Strategy initialized:")
         logger.info(f"  Strategy: {strategy}")
         logger.info(f"  Window: {self.trade_start} - {self.trade_end}")
-        logger.info(f"  ORB Buffer: {orb_buffer_pct:.1%} of range")
         logger.info(f"  Options: ${min_option_price:.2f} - ${max_option_price:.2f}")
         logger.info(f"  Target: {profit_target_pct:.0%} | Stop: {stop_loss_pct:.0%}")
-        logger.info(f"  Max Hold: {max_hold_minutes} min")
-        logger.info(f"  Exit Hour: {exit_hour}:00")
         logger.info(f"  Capital: ${self.account_capital:,.2f}")
         
         # Trade database reference (set by engine)
@@ -247,7 +236,7 @@ class Live0DTEStrategy(OptionStrategy):
         self._recover_open_positions()
     
     def _recover_open_positions(self):
-        """Recover open positions from database on startup, close orphans"""
+        """Recover open positions from database on startup"""
         if not self._trade_db:
             return
         
@@ -256,56 +245,11 @@ class Live0DTEStrategy(OptionStrategy):
             logger.info("No open positions to recover")
             return
         
-        logger.info(f"Found {len(open_trades)} open trade(s) in DB")
-        
-        # If multiple open trades, close all orphans (keep only most recent)
-        spy_trades = [t for t in open_trades if 'SPY' in t.get('symbol', '')]
-        
-        if len(spy_trades) > 1:
-            # Sort by entry_time descending, keep most recent, close rest
-            spy_trades.sort(key=lambda t: t.get('entry_time', ''), reverse=True)
-            for orphan in spy_trades[1:]:
-                trade_id = orphan.get('id')
-                logger.warning(f"CLOSING ORPHAN trade {trade_id}: {orphan.get('symbol')} (stale open position)")
-                try:
-                    self._trade_db.close_trade(
-                        trade_id=trade_id,
-                        exit_price=orphan.get('entry_price', 0),
-                        pnl=0,
-                        notes="ORPHAN: closed on startup - stale open position"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to close orphan trade {trade_id}: {e}")
-            spy_trades = spy_trades[:1]  # Keep only most recent
-        
-        # Recover the most recent open trade
-        if spy_trades:
-            trade = spy_trades[0]
+        # Find the most recent open trade for our symbol
+        for trade in open_trades:
             symbol = trade.get('symbol', '')
             if 'SPY' in symbol and ('P' in symbol or 'C' in symbol):
-                # Check if trade is stale (entry > max_hold_minutes ago)
-                from datetime import datetime as dt_datetime
-                try:
-                    entry_dt = dt_datetime.fromisoformat(trade.get('entry_time', ''))
-                    now = get_eastern_time()
-                    if entry_dt.tzinfo is None and now.tzinfo is not None:
-                        entry_dt = entry_dt.replace(tzinfo=now.tzinfo)
-                    hold_minutes = (now - entry_dt).total_seconds() / 60
-                    if hold_minutes > self.max_hold_minutes * 2:  # Stale if 2x max hold
-                        logger.warning(f"CLOSING STALE trade {trade.get('id')}: held {hold_minutes:.0f} min (>{self.max_hold_minutes*2} limit)")
-                        try:
-                            self._trade_db.close_trade(
-                                trade_id=trade.get('id'),
-                                exit_price=trade.get('entry_price', 0),
-                                pnl=0,
-                                notes=f"STALE: closed on startup after {hold_minutes:.0f} min"
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to close stale trade: {e}")
-                        return
-                except (ValueError, TypeError):
-                    pass
-                
+                # Recover this position
                 direction = 'PUT' if symbol.rfind('P') > symbol.rfind('C') else 'CALL'
                 self.trade_state = TradeState(
                     in_trade=True,
@@ -319,6 +263,7 @@ class Live0DTEStrategy(OptionStrategy):
                 )
                 logger.info(f"RECOVERED open position: {direction} {self.trade_state.quantity}x {symbol} @ ${self.trade_state.entry_price:.2f}")
                 logger.info(f"  Entry time: {self.trade_state.entry_time}")
+                break
     
     def _load_persisted_state(self):
         """Load persisted state from previous sessions"""
@@ -417,20 +362,13 @@ class Live0DTEStrategy(OptionStrategy):
         if self.trade_state.in_trade:
             return None
         
-        # Check cooldown after last exit (prevent rapid re-entry on same breakout)
-        if self._last_exit_time:
-            seconds_since_exit = (now - self._last_exit_time).total_seconds()
-            if seconds_since_exit < self._signal_cooldown_seconds:
-                return None
-        
         # Generate signal
         signal_direction = self._get_signal(price, quote)
         
         if signal_direction:
             logger.info(f"SIGNAL: {signal_direction} | SPY @ ${price:.2f}")
-            # Set pending direction for option selection with timestamp
+            # Set pending direction for option selection
             self._pending_direction = signal_direction
-            self._pending_direction_time = now
             # Return signal - actual option selection happens in on_option_quote
             return Signal(
                 symbol="SPY",
@@ -474,16 +412,8 @@ class Live0DTEStrategy(OptionStrategy):
         
         # ===== CHECK FOR NEW ENTRY =====
         if not self.trade_state.in_trade:
-            # Check if we have a pending signal (and it hasn't expired)
+            # Check if we have a pending signal
             if hasattr(self, '_pending_direction') and self._pending_direction:
-                # Check pending signal expiry
-                if self._pending_direction_time:
-                    pending_age = (now - self._pending_direction_time).total_seconds()
-                    if pending_age > self._pending_expiry_seconds:
-                        logger.info(f"Pending signal expired after {pending_age:.0f}s")
-                        self._pending_direction = None
-                        self._pending_direction_time = None
-                        return None
                 direction = self._pending_direction
                 
                 # Check if option matches direction
@@ -567,17 +497,7 @@ class Live0DTEStrategy(OptionStrategy):
         # ===== MAX HOLD TIME EXIT =====
         elif self.trade_state.entry_time:
             from datetime import datetime as dt_datetime
-            try:
-                entry_dt = dt_datetime.fromisoformat(self.trade_state.entry_time)
-                # Ensure both datetimes are timezone-aware for correct subtraction
-                if entry_dt.tzinfo is None and now.tzinfo is not None:
-                    entry_dt = entry_dt.replace(tzinfo=now.tzinfo)
-                elif entry_dt.tzinfo is not None and now.tzinfo is None:
-                    now = now.replace(tzinfo=entry_dt.tzinfo)
-            except (ValueError, TypeError):
-                # Fallback: parse entry time manually
-                logger.warning(f"Could not parse entry_time: {self.trade_state.entry_time}")
-                entry_dt = now  # Force exit on parse failure
+            entry_dt = dt_datetime.fromisoformat(self.trade_state.entry_time)
             hold_minutes = (now - entry_dt).total_seconds() / 60
             if hold_minutes >= self.max_hold_minutes:
                 exit_reason = f"MAX HOLD TIME ({int(hold_minutes)}min): {pnl_pct:.1%}"
@@ -616,7 +536,6 @@ class Live0DTEStrategy(OptionStrategy):
             symbol = self.trade_state.symbol
             quantity = self.trade_state.quantity
             self.trade_state = TradeState()
-            self._last_exit_time = now  # Set cooldown timer
             
             return self.create_signal(
                 symbol=symbol,
@@ -882,7 +801,7 @@ def create_0dte_strategy(
     Returns:
         Configured Live0DTEStrategy
     """
-    # Default parameters from backtest config (optimized)
+    # Default parameters from backtest config
     defaults = {
         "strategy": strategy,
         "profit_target_pct": 0.22,

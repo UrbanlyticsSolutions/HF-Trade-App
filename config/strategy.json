@@ -21,18 +21,18 @@
     "underwater_stop_tighten": 0.15,
     "quick_exit_profit_threshold": 0.05,
     "breakeven_buffer_pct": 0.02,
-    "trade_start_hour": 9,
-    "trade_start_minute": 30,
-    "trade_end_hour": 15,
-    "trade_end_minute": 55,
-    "exit_hour": 16,
+    "trade_start_hour": 10,
+    "trade_start_minute": 0,
+    "trade_end_hour": 11,
+    "trade_end_minute": 0,
+    "exit_hour": 15,
     "max_hold_minutes": 5,
     "rsi_call_threshold": 70,
     "rsi_put_threshold": 30,
     "bb_buffer_pct": 0.0,
     "vwap_dev_threshold": 0.3,
     "orb_minutes": 30,
-    "orb_buffer_pct": 0.1,
+    "orb_buffer_pct": 0.10,
     "min_option_price": 0.50,
     "max_option_price": 1.00
   },
@@ -115,10 +115,10 @@
   },
   "backtest": {
     "initial_capital": 10000,
-    "train_start": "2024-01-01",
-    "train_end": "2024-06-30",
-    "test_start": "2024-07-01",
-    "test_end": "2024-12-31"
+    "train_start": "2024-07-01",
+    "train_end": "2025-12-31",
+    "test_start": "2026-01-02",
+    "test_end": "2026-02-10"
   },
   "optimized_results": {
     "train_period": "Jan-Jun 2024",
@@ -141,10 +141,11 @@
     "optimization_date": "2026-01-18"
   },
   "strategy_notes": {
-    "window": "10:00-11:00 (1 hour only) - best risk-adjusted returns",
-    "option_price": "$0.50-$1.00 - cheap options with high gamma",
+    "window": "9:30-15:55 full day trading window",
+    "option_price": "$0.50-$5.00 - full option price range",
     "hold_time": "87% of trades close in 5 minutes (1 bar)",
-    "exit_rules": "22% profit target, 25% stop loss, 5 min max hold",
-    "risk_mgmt": "Stop after first daily loss to prevent compounding losses"
+    "exit_rules": "22% profit target, 25% stop loss, 5 min max hold, EOD exit at 15:00",
+    "orb_buffer": "0.1% of ORB range - tight breakout filter",
+    "risk_mgmt": "Signal cooldown 60s, pending expiry 30s, orphan cleanup on startup"
   }
 }

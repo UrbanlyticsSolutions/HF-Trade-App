@@ -423,7 +423,8 @@ class StatePersistence:
         print(f"Max Drawdown:       {s['max_drawdown']:>12.1%}")
         print("-" * 60)
         print(f"Trading Days:       {s['trading_days']:>12}")
-        print(f"Last Trade:         {s['last_trade_date']:>12}")
+        last_trade = s['last_trade_date'] or 'N/A'
+        print(f"Last Trade:         {last_trade:>12}")
         print("=" * 60)
     
     def get_daily_history(self, days: int = 30) -> List[Dict]:

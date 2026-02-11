@@ -173,6 +173,18 @@ def main():
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     logs_dir = os.path.join(project_dir, 'logs')
     data_dir = os.path.join(project_dir, 'data')
+    config_dir = os.path.join(project_dir, 'config')
+    
+    # Load strategy config from JSON file
+    import json
+    config_file = os.path.join(config_dir, 'strategy.json')
+    trade_config = {}
+    risk_config = {}
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+            trade_config = config.get('trade_config', {})
+            risk_config = config.get('risk_config', {})
     
     # Ensure directories exist
     os.makedirs(logs_dir, exist_ok=True)
@@ -196,16 +208,22 @@ def main():
     print(f"Mode: {mode}")
     print(f"Capital: ${args.capital:,.2f}")
     print(f"Strategy: {args.strategy.upper()}")
-    print(f"Profit Target: {args.target:.0%}")
-    print(f"Stop Loss: {args.stop:.0%}")
+    print(f"Profit Target: {trade_config.get('profit_target_pct', 0.22):.0%}")
+    print(f"Stop Loss: {trade_config.get('stop_loss_pct', 0.25):.0%}")
     print(f"Max Contracts: {args.max_contracts}")
+    print(f"Option Price Range: ${trade_config.get('min_option_price', 0.50):.2f} - ${trade_config.get('max_option_price', 1.00):.2f}")
+    print(f"ORB Buffer: {trade_config.get('orb_buffer_pct', 0.10):.0%} of range")
+    print(f"Trading Window: {trade_config.get('trade_start_hour', 10)}:{trade_config.get('trade_start_minute', 0):02d} - {trade_config.get('trade_end_hour', 11)}:{trade_config.get('trade_end_minute', 0):02d} ET")
+    print(f"Exit Hour: {trade_config.get('exit_hour', 15)}:00 ET")
+    print(f"ORB Minutes: {trade_config.get('orb_minutes', 30)}")
+    print(f"Max Hold: {trade_config.get('max_hold_minutes', 5)} min")
     if mode == "LIVE":
         print(">>> WARNING: LIVE TRADING - REAL ORDERS WILL BE PLACED <<<")
     elif mode == "PAPER":
         print(">>> PAPER TRADING - Simulated fills, no real orders <<<")
     else:
         print(">>> MONITOR ONLY - No orders executed <<<")
-    print(f"Stop After First Loss: {not args.no_stop_after_loss}")
+    print(f"Stop After First Loss: {risk_config.get('stop_after_first_loss', not args.no_stop_after_loss)}")
     print("=" * 70)
     
     try:
@@ -245,13 +263,24 @@ def main():
         )
         
         # Create 0DTE strategy with client for ORB backfill
+        # Use config values for ALL parameters, falling back to optimal defaults
         strategy = create_0dte_strategy(
             account_capital=args.capital,
             strategy=args.strategy,
-            profit_target_pct=args.target,
-            stop_loss_pct=args.stop,
+            profit_target_pct=trade_config.get('profit_target_pct', 0.22),
+            stop_loss_pct=trade_config.get('stop_loss_pct', 0.25),
             max_contracts=args.max_contracts,
-            stop_after_first_loss=not args.no_stop_after_loss,
+            stop_after_first_loss=risk_config.get('stop_after_first_loss', not args.no_stop_after_loss),
+            min_option_price=trade_config.get('min_option_price', 0.50),
+            max_option_price=trade_config.get('max_option_price', 1.00),
+            orb_minutes=trade_config.get('orb_minutes', 30),
+            orb_buffer_pct=trade_config.get('orb_buffer_pct', 0.10),
+            max_hold_minutes=trade_config.get('max_hold_minutes', 5),
+            trade_start_hour=trade_config.get('trade_start_hour', 10),
+            trade_start_minute=trade_config.get('trade_start_minute', 0),
+            trade_end_hour=trade_config.get('trade_end_hour', 11),
+            trade_end_minute=trade_config.get('trade_end_minute', 0),
+            exit_hour=trade_config.get('exit_hour', 15),
             questrade_client=client
         )
         

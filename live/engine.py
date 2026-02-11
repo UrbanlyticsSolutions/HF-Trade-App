@@ -285,6 +285,62 @@ class LiveTradingEngine:
         """Process option quotes and run strategies"""
         from .strategy import OptionQuote
         
+        today = get_eastern_time().strftime("%Y-%m-%d")
+        
+        # ===== STEP 1: Fetch quotes for OPEN POSITIONS first =====
+        # This ensures we can exit positions even if they drift away from ATM
+        open_position_symbols = set()
+        for strategy in self._strategies:
+            if hasattr(strategy, 'trade_state') and strategy.trade_state.in_trade:
+                if strategy.trade_state.symbol:
+                    open_position_symbols.add(strategy.trade_state.symbol)
+        
+        if open_position_symbols:
+            logger.info(f"Fetching quotes for {len(open_position_symbols)} open positions: {open_position_symbols}")
+            for symbol in open_position_symbols:
+                try:
+                    quote_data = self.client.get_quote_by_symbol(symbol)
+                    if quote_data:
+                        # Parse option type from symbol
+                        c_pos = symbol.rfind('C')
+                        p_pos = symbol.rfind('P')
+                        opt_type = 'call' if c_pos > p_pos else 'put'
+                        
+                        quote = OptionQuote(
+                            symbol=symbol,
+                            underlying="SPY",
+                            underlying_price=quote_data.get('underlyingPrice', 0),
+                            strike=quote_data.get('strikePrice', 0),
+                            expiration=today,
+                            option_type=opt_type,
+                            bid=quote_data.get('bidPrice', 0),
+                            ask=quote_data.get('askPrice', 0),
+                            last=quote_data.get('lastTradePrice', quote_data.get('lastTradePriceTrHrs', 0)),
+                            volume=quote_data.get('volume', 0),
+                            open_interest=quote_data.get('openInterest', 0),
+                            delta=quote_data.get('delta'),
+                            gamma=quote_data.get('gamma'),
+                            theta=quote_data.get('theta'),
+                            vega=quote_data.get('vega'),
+                            iv=quote_data.get('volatility'),
+                            timestamp=get_eastern_time().isoformat()
+                        )
+                        
+                        logger.info(f"Open position quote: {symbol} bid=${quote.bid:.2f} ask=${quote.ask:.2f} last=${quote.last:.2f}")
+                        
+                        # Process for exit check
+                        for strategy in self._strategies:
+                            if not strategy.is_active:
+                                continue
+                            signal = strategy.on_option_quote(quote)
+                            if signal:
+                                self._process_signal(signal)
+                    else:
+                        logger.warning(f"Could not fetch quote for open position: {symbol}")
+                except Exception as e:
+                    logger.error(f"Error fetching quote for open position {symbol}: {e}")
+        
+        # ===== STEP 2: Fetch ATM options for new entries =====
         for underlying in self.config.option_underlyings:
             try:
                 # Get 0DTE options (today's expiry)

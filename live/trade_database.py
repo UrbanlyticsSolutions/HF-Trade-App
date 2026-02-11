@@ -275,7 +275,8 @@ class TradeDatabase:
         exit_price: float,
         exit_time: Optional[str] = None,
         exit_order_id: Optional[int] = None,
-        underlying_price_exit: Optional[float] = None
+        underlying_price_exit: Optional[float] = None,
+        notes: Optional[str] = None
     ) -> Optional[Trade]:
         """Close a trade and calculate P&L"""
         trade = self.get_trade(trade_id)
@@ -301,7 +302,8 @@ class TradeDatabase:
             underlying_price_exit=underlying_price_exit,
             status='closed',
             pnl=pnl,
-            pnl_percent=pnl_percent
+            pnl_percent=pnl_percent,
+            notes=notes
         )
         
         # Update daily P&L
