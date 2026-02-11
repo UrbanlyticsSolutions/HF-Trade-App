@@ -271,7 +271,6 @@ class Live0DTEStrategy(OptionStrategy):
                     self._trade_db.close_trade(
                         trade_id=trade_id,
                         exit_price=orphan.get('entry_price', 0),
-                        pnl=0,
                         notes="ORPHAN: closed on startup - stale open position"
                     )
                 except Exception as e:
@@ -297,7 +296,6 @@ class Live0DTEStrategy(OptionStrategy):
                             self._trade_db.close_trade(
                                 trade_id=trade.get('id'),
                                 exit_price=trade.get('entry_price', 0),
-                                pnl=0,
                                 notes=f"STALE: closed on startup after {hold_minutes:.0f} min"
                             )
                         except Exception as e:
