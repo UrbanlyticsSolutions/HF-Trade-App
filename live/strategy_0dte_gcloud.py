@@ -124,10 +124,10 @@ class Live0DTEStrategy(OptionStrategy):
         # RSI parameters (for momentum strategy fallback)
         rsi_call_threshold: float = 70,
         rsi_put_threshold: float = 30,
-        # Risk management
+        # Risk management (aligned with backtest RiskManager defaults)
         max_contracts: int = 5,
-        stop_after_first_loss: bool = True,
-        max_consecutive_losses: int = 2,
+        stop_after_first_loss: bool = False,  # Backtest runs with False — never stop after loss
+        max_consecutive_losses: int = 999,  # Backtest default 999 — effectively unlimited
         # Capital
         account_capital: float = 10000,
         risk_per_trade_pct: float = 0.02,
@@ -818,8 +818,8 @@ def create_0dte_strategy(
         "rsi_call_threshold": 70,
         "rsi_put_threshold": 30,
         "max_contracts": 5,
-        "stop_after_first_loss": True,
-        "max_consecutive_losses": 2,
+        "stop_after_first_loss": False,  # Aligned with backtest RiskManager
+        "max_consecutive_losses": 999,  # Aligned with backtest RiskManager
         "account_capital": account_capital,
         "risk_per_trade_pct": 0.02,
     }

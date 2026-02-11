@@ -109,9 +109,9 @@
     "max_risk_per_trade_pct": 0.02,
     "max_position_pct": 0.07,
     "max_position_value": 5000,
-    "stop_after_first_loss": true,
-    "max_consecutive_losses": 2,
-    "reduce_size_at_dd_pct": 0.05
+    "stop_after_first_loss": false,
+    "max_consecutive_losses": 999,
+    "reduce_size_at_dd_pct": 0.99
   },
   "backtest": {
     "initial_capital": 10000,
