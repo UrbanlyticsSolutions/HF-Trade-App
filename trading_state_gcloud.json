@@ -16,12 +16,8 @@
     }
   ],
   "daily_records": [],
-  "last_updated": "2026-02-10T21:14:31.271533",
+  "last_updated": "2026-02-10T21:30:00",
   "last_trade_date": "",
-  "engine_status": "sleep",
-  "strategy_state": {},
-  "engine_last_update": "2026-02-10T21:44:32.023319",
-  "engine_waiting_for": "market_open",
-  "engine_opens_in": "8h 40m",
-  "engine_current_time_et": "00:44:32"
+  "engine_status": "ready",
+  "strategy_state": {}
 }
