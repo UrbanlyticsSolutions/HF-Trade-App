@@ -62,6 +62,45 @@ def requires_auth(f):
 # Process tracking for restart functionality
 ENGINE_PROCESS = None
 
+# ============================================================
+# STRATEGY CONFIGURATION
+# ============================================================
+
+def load_strategy_config():
+    """Load strategy configuration from JSON file."""
+    config_path = Path(__file__).parent / "config" / "strategy.json"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                return json.load(f)
+        except Exception as e:
+            return {}
+    return {}
+
+
+def save_strategy_config(trade_config, risk_config):
+    """Save strategy configuration to JSON file."""
+    config_path = Path(__file__).parent / "config" / "strategy.json"
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+        
+        # Update trade_config fields
+        for key, value in trade_config.items():
+            if key in data.get('trade_config', {}):
+                data['trade_config'][key] = value
+        
+        # Update risk_config fields
+        for key, value in risk_config.items():
+            if key in data.get('risk_config', {}):
+                data['risk_config'][key] = value
+        
+        with open(config_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        return False
+
 
 # ============================================================
 # SYSTEM STATUS
@@ -323,8 +362,9 @@ def get_trades_df():
     conn.close()
     
     if not df.empty:
-        df['entry_time'] = pd.to_datetime(df['entry_time'])
-        df['exit_time'] = pd.to_datetime(df['exit_time'])
+        # Use format='ISO8601' and utc=True to handle timestamps with mixed timezones
+        df['entry_time'] = pd.to_datetime(df['entry_time'], format='ISO8601', utc=True, errors='coerce')
+        df['exit_time'] = pd.to_datetime(df['exit_time'], format='ISO8601', utc=True, errors='coerce')
         df['trade_date'] = df['entry_time'].dt.date
     
     return df
@@ -850,12 +890,118 @@ def serve_layout():
                     'fontWeight': 'bold',
                     'fontSize': '0.9em'
                 }),
+                html.Button("⚙️ Config", id='config-toggle-btn', n_clicks=0, style={
+                    'background': 'linear-gradient(90deg, #5f27cd, #7c3aed)',
+                    'color': '#fff',
+                    'border': 'none',
+                    'padding': '8px 15px',
+                    'borderRadius': '20px',
+                    'cursor': 'pointer',
+                    'fontWeight': 'bold',
+                    'fontSize': '0.9em',
+                    'marginLeft': '10px'
+                }),
                 html.Span(id='restart-status', style={'marginLeft': '10px', 'fontSize': '0.85em'})
             ], style={'marginTop': '10px', 'display': 'flex', 'alignItems': 'center', 'flexWrap': 'wrap'})
         ], className='section-container', style={
             'background': 'rgba(255,255,255,0.05)',
             'borderRadius': '10px',
             'padding': '12px 15px',
+            'marginBottom': '15px',
+            'border': '1px solid rgba(255,255,255,0.1)'
+        }),
+        
+        # Configuration Panel (hidden by default)
+        html.Div(id='config-panel', children=[
+            html.H3("Strategy Configuration", style={'marginBottom': '15px', 'color': '#00d9ff'}),
+            html.Div([
+                # Risk Config
+                html.Div([
+                    html.H4("Risk Management", style={'color': '#ffa500', 'marginBottom': '10px'}),
+                    html.Div([
+                        html.Label("Stop After First Loss:", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Dropdown(id='cfg-stop-after-first-loss', options=[
+                            {'label': 'Yes (Conservative)', 'value': True},
+                            {'label': 'No (Aggressive)', 'value': False}
+                        ], style={'color': '#000', 'width': '200px'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Kelly Fraction:", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-kelly-fraction', type='number', min=0.05, max=1.0, step=0.05, 
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Max Position Value ($):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-max-position-value', type='number', min=100, max=50000, step=100,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                ], style={'flex': '1', 'minWidth': '250px', 'padding': '15px', 'background': 'rgba(255,255,255,0.03)', 'borderRadius': '10px', 'marginRight': '10px'}),
+                
+                # Trade Config
+                html.Div([
+                    html.H4("Exit Rules", style={'color': '#00ff88', 'marginBottom': '10px'}),
+                    html.Div([
+                        html.Label("Profit Target (50% = 0.50):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-profit-target', type='number', min=0.05, max=2.0, step=0.01,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Stop Loss (35% = 0.35):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-stop-loss', type='number', min=0.05, max=1.0, step=0.01,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Max Hold (minutes):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-max-hold', type='number', min=1, max=120, step=5,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                ], style={'flex': '1', 'minWidth': '250px', 'padding': '15px', 'background': 'rgba(255,255,255,0.03)', 'borderRadius': '10px', 'marginRight': '10px'}),
+                
+                # Option Filter Config
+                html.Div([
+                    html.H4("Option Filters", style={'color': '#ff6b81', 'marginBottom': '10px'}),
+                    html.Div([
+                        html.Label("Min Option Price ($):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-min-option-price', type='number', min=0.10, max=5.0, step=0.05,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Max Option Price ($):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-max-option-price', type='number', min=0.50, max=10.0, step=0.10,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Max Consecutive Losses:", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-max-consec-losses', type='number', min=1, max=10, step=1,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                    html.Div([
+                        html.Label("Max Daily Loss (%):", style={'display': 'block', 'marginBottom': '5px'}),
+                        dcc.Input(id='cfg-max-daily-loss', type='number', min=0.1, max=5.0, step=0.1,
+                                  style={'width': '100px', 'padding': '5px', 'borderRadius': '5px', 'border': '1px solid #444', 'background': '#333', 'color': '#fff'})
+                    ], style={'marginBottom': '15px'}),
+                ], style={'flex': '1', 'minWidth': '250px', 'padding': '15px', 'background': 'rgba(255,255,255,0.03)', 'borderRadius': '10px'}),
+            ], style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '10px', 'marginBottom': '20px'}),
+            
+            # Save Button
+            html.Div([
+                html.Button("💾 Save & Restart Engine", id='save-config-btn', n_clicks=0, style={
+                    'background': 'linear-gradient(90deg, #00d9ff, #00ff88)',
+                    'color': '#000',
+                    'border': 'none',
+                    'padding': '12px 25px',
+                    'borderRadius': '25px',
+                    'cursor': 'pointer',
+                    'fontWeight': 'bold',
+                    'fontSize': '1em'
+                }),
+                html.Span(id='config-save-status', style={'marginLeft': '15px', 'fontSize': '0.9em'})
+            ], style={'textAlign': 'center'})
+        ], style={
+            'display': 'none',
+            'background': 'rgba(255,255,255,0.05)',
+            'borderRadius': '10px',
+            'padding': '20px',
             'marginBottom': '15px',
             'border': '1px solid rgba(255,255,255,0.1)'
         }),
@@ -1092,11 +1238,22 @@ def update_dashboard(n):
     elif engine_status == 'error':
         engine_info = f" ({state.get('engine_error_message', 'unknown')[:30]})"
     
+    # Get strategy name from config
+    strategy_config = load_strategy_config()
+    active_strategy = strategy_config.get('trade_config', {}).get('strategy', 'unknown').upper()
+    pt_pct = strategy_config.get('trade_config', {}).get('profit_target_pct', 0)
+    sl_pct = strategy_config.get('trade_config', {}).get('stop_loss_pct', 0)
+    
     status_bar = html.Div([
         html.Span("ENGINE", style={'color': '#888', 'fontSize': '0.75em', 'marginRight': '10px'}),
         html.Span([
             html.Span(engine_status.upper(), style={'color': get_status_color(engine_status), 'fontWeight': 'bold'}),
             html.Span(engine_info, style={'color': '#888', 'fontSize': '0.85em'})
+        ], style={'marginRight': '15px'}),
+        html.Span([
+            html.Span("Strategy: ", style={'color': '#888', 'fontSize': '0.85em'}),
+            html.Span(f"{active_strategy} (PT{int(pt_pct*100)}%/SL{int(sl_pct*100)}%)", 
+                      style={'color': '#00d9ff', 'fontWeight': 'bold', 'fontSize': '0.85em'})
         ], style={'marginRight': '15px'}),
         html.Span([
             html.Span("Token: ", style={'color': '#888', 'fontSize': '0.85em'}),
@@ -1186,7 +1343,8 @@ def restart_engine(n_clicks):
         try:
             # Try systemd restart for VM deployment
             result = subprocess.run(
-                ["sudo", "systemctl", "restart", "trading-engine"],
+                "/usr/bin/sudo /usr/bin/systemctl restart trading-engine",
+                shell=True,
                 capture_output=True,
                 text=True,
                 timeout=10
@@ -1203,6 +1361,115 @@ def restart_engine(n_clicks):
         except Exception as e:
             return html.Span(f"Error: {str(e)}", style={'color': '#ff4757'})
     return ""
+
+
+@app.callback(
+    Output('config-panel', 'style'),
+    [Input('config-toggle-btn', 'n_clicks')],
+    [State('config-panel', 'style')],
+    prevent_initial_call=True
+)
+def toggle_config_panel(n_clicks, current_style):
+    """Toggle visibility of config panel."""
+    if n_clicks:
+        if current_style.get('display') == 'none':
+            return {**current_style, 'display': 'block'}
+        else:
+            return {**current_style, 'display': 'none'}
+    return current_style
+
+
+@app.callback(
+    [Output('cfg-stop-after-first-loss', 'value'),
+     Output('cfg-kelly-fraction', 'value'),
+     Output('cfg-max-position-value', 'value'),
+     Output('cfg-profit-target', 'value'),
+     Output('cfg-stop-loss', 'value'),
+     Output('cfg-max-hold', 'value'),
+     Output('cfg-min-option-price', 'value'),
+     Output('cfg-max-option-price', 'value'),
+     Output('cfg-max-consec-losses', 'value'),
+     Output('cfg-max-daily-loss', 'value')],
+    [Input('config-toggle-btn', 'n_clicks')],
+    prevent_initial_call=True
+)
+def load_config_values(n_clicks):
+    """Load current config values when panel opens."""
+    config = load_strategy_config()
+    trade_cfg = config.get('trade_config', {})
+    risk_cfg = config.get('risk_config', {})
+    
+    return (
+        risk_cfg.get('stop_after_first_loss', True),
+        risk_cfg.get('kelly_fraction', 0.20),
+        risk_cfg.get('max_position_value', 5000),
+        trade_cfg.get('profit_target_pct', 0.50),
+        trade_cfg.get('stop_loss_pct', 0.35),
+        trade_cfg.get('max_hold_minutes', 80),
+        trade_cfg.get('min_option_price', 0.50),
+        trade_cfg.get('max_option_price', 2.00),
+        risk_cfg.get('max_consecutive_losses', 3),
+        risk_cfg.get('max_daily_loss_pct', 0.8)
+    )
+
+
+@app.callback(
+    Output('config-save-status', 'children'),
+    [Input('save-config-btn', 'n_clicks')],
+    [State('cfg-stop-after-first-loss', 'value'),
+     State('cfg-kelly-fraction', 'value'),
+     State('cfg-max-position-value', 'value'),
+     State('cfg-profit-target', 'value'),
+     State('cfg-stop-loss', 'value'),
+     State('cfg-max-hold', 'value'),
+     State('cfg-min-option-price', 'value'),
+     State('cfg-max-option-price', 'value'),
+     State('cfg-max-consec-losses', 'value'),
+     State('cfg-max-daily-loss', 'value')],
+    prevent_initial_call=True
+)
+def save_config_and_restart(n_clicks, stop_after_first_loss, kelly_fraction, max_position_value,
+                            profit_target, stop_loss, max_hold, min_option_price, max_option_price,
+                            max_consec_losses, max_daily_loss):
+    """Save configuration and restart trading engine."""
+    if not n_clicks:
+        return ""
+    
+    try:
+        # Prepare config updates
+        trade_config = {
+            'profit_target_pct': profit_target,
+            'stop_loss_pct': stop_loss,
+            'max_hold_minutes': max_hold,
+            'min_option_price': min_option_price,
+            'max_option_price': max_option_price
+        }
+        risk_config = {
+            'stop_after_first_loss': stop_after_first_loss,
+            'kelly_fraction': kelly_fraction,
+            'max_position_value': max_position_value,
+            'max_consecutive_losses': max_consec_losses,
+            'max_daily_loss_pct': max_daily_loss
+        }
+        
+        # Save config
+        if save_strategy_config(trade_config, risk_config):
+            # Restart engine using shell=True for proper sudo execution
+            result = subprocess.run(
+                "/usr/bin/sudo /usr/bin/systemctl restart trading-engine",
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return html.Span("✅ Config saved & engine restarted!", style={'color': '#00ff88'})
+            else:
+                return html.Span(f"⚠️ Config saved, restart: {result.stderr or 'failed'}", style={'color': '#ffa500'})
+        else:
+            return html.Span("❌ Failed to save config", style={'color': '#ff4757'})
+    except Exception as e:
+        return html.Span(f"❌ Error: {str(e)}", style={'color': '#ff4757'})
 
 
 def main():
