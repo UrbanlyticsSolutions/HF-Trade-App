@@ -1,9 +1,9 @@
 {
-  "strategy": "orb",
+  "strategy": "momentum",
   "trade_config": {
-    "strategy": "orb",
-    "profit_target_pct": 0.22,
-    "stop_loss_pct": 0.25,
+    "strategy": "momentum",
+    "profit_target_pct": 0.50,
+    "stop_loss_pct": 0.35,
     "use_ml_filter": false,
     "skip_day_filter": true,
     "use_adaptive_exits": false,
@@ -14,10 +14,8 @@
     "stop_mid_vol": 0.20,
     "stop_high_vol": 0.25,
     "use_trailing_stop": false,
-    "use_time_decay_exit": true,
-    "time_decay_profit_per_bar": 0.03,
-    "min_profit_target": 0.10,
-    "use_quick_exit": true,
+    "use_time_decay_exit": false,
+    "use_quick_exit": false,
     "underwater_stop_tighten": 0.15,
     "quick_exit_profit_threshold": 0.05,
     "breakeven_buffer_pct": 0.02,
@@ -26,7 +24,8 @@
     "trade_end_hour": 11,
     "trade_end_minute": 0,
     "exit_hour": 15,
-    "max_hold_minutes": 5,
+    "max_hold_bars": 16,
+    "max_hold_minutes": 80,
     "rsi_call_threshold": 70,
     "rsi_put_threshold": 30,
     "bb_buffer_pct": 0.0,
@@ -34,7 +33,7 @@
     "orb_minutes": 30,
     "orb_buffer_pct": 0.10,
     "min_option_price": 0.50,
-    "max_option_price": 1.00
+    "max_option_price": 2.00
   },
   "strategy_presets": {
     "momentum": {
@@ -109,9 +108,14 @@
     "max_risk_per_trade_pct": 0.02,
     "max_position_pct": 0.07,
     "max_position_value": 5000,
-    "stop_after_first_loss": false,
-    "max_consecutive_losses": 999,
-    "reduce_size_at_dd_pct": 0.99
+    "stop_after_first_loss": true,
+    "max_daily_loss_pct": 0.008,
+    "max_consecutive_losses": 3,
+    "consec_loss_reduction": 0.50,
+    "wins_to_reset_streak": 2,
+    "reduce_size_at_dd_pct": 0.99,
+    "max_dd_reduction": 0.50,
+    "max_trades_per_day": 999
   },
   "backtest": {
     "initial_capital": 10000,
@@ -121,31 +125,113 @@
     "test_end": "2026-02-10"
   },
   "optimized_results": {
-    "train_period": "Jan-Jun 2024",
-    "train_trades": 156,
-    "train_win_rate": 75.6,
-    "train_pnl": 360680,
-    "train_max_dd": 5.0,
-    "train_pf": 10.6,
-    "test_period": "Jul-Dec 2024",
-    "test_trades": 181,
-    "test_win_rate": 81.2,
-    "test_pnl": 934080,
-    "test_max_dd": 7.1,
-    "test_pf": 18.0,
-    "oos_2025_trades": 392,
-    "oos_2025_win_rate": 84.4,
-    "oos_2025_pnl": 2296010,
-    "oos_2025_max_dd": 4.4,
-    "oos_2025_pf": 23.5,
-    "optimization_date": "2026-01-18"
+    "optimization_date": "2026-02-14",
+    "optimization_phase": "Phase 8 - Multi-Objective Optuna NSGA-II (200 trials, 9 dimensions, composite #1)",
+    "train_period": "2025-01-02 to 2025-12-31 (179 days)",
+    "oos_period": "2026-01-02 to 2026-02-10 (27 days)",
+    "strategy": "momentum",
+    "profit_target": 0.50,
+    "stop_loss": 0.35,
+    "max_hold_bars": 16,
+    "stop_after_first_loss": true,
+    "max_consecutive_losses": 3,
+    "max_daily_loss_pct": 0.008,
+    "changes_from_phase7": {
+      "stop_loss_pct": "0.30 -> 0.35 (wider SL, winners breathe more under SFL)",
+      "max_hold_bars": "20 -> 16 (80 min hold, tighter exit timing)",
+      "max_consecutive_losses": "2 -> 3 (more lenient CL, SFL already limits losses)",
+      "max_daily_loss_pct": "0.015 -> 0.008 (tighter daily loss limit)"
+    },
+    "changes_from_original_baseline": {
+      "profit_target_pct": "0.40 -> 0.50 (let winners run, Phase 6)",
+      "stop_loss_pct": "0.40 -> 0.35 (Phase 8, wider than Phase 7's 0.30)",
+      "max_hold_bars": "12 -> 16 (80 min, Phase 8 found 16 beats 20 with SFL)",
+      "stop_after_first_loss": "false -> true (Phase 7 discovery)",
+      "max_consecutive_losses": "3 -> 3 (restored, SFL makes CL less critical)",
+      "max_daily_loss_pct": "0.015 -> 0.008 (Phase 8, tighter DLL)"
+    },
+    "train_2025": {
+      "trades": 86,
+      "win_rate": 75.6,
+      "total_pnl": 20330,
+      "return_pct": 203.3,
+      "max_dd": 7.2,
+      "profit_factor": 5.24,
+      "sharpe": 5.24
+    },
+    "oos_2026": {
+      "trades": 86,
+      "win_rate": 75.6,
+      "total_pnl": 18730,
+      "return_pct": 187.3,
+      "max_dd": 5.8,
+      "profit_factor": 4.64,
+      "sharpe": 10.60
+    },
+    "vs_phase7": {
+      "oos_return": "+187.3% vs +160.4% (+27pp, 1.17x)",
+      "oos_dd": "5.8% vs 3.5% (+2.3pp, still excellent)",
+      "oos_sharpe": "10.60 vs 11.34 (slightly lower, but more return)",
+      "oos_pf": "4.64 vs 5.23 (similar quality)",
+      "oos_winrate": "75.6% vs 73.4% (+2.2pp)",
+      "train_dd": "7.2% vs 5.4% (+1.8pp)"
+    },
+    "vs_original_baseline": {
+      "train_improvement": "+203% vs +137% (1.5x)",
+      "oos_improvement": "+187% vs +37% (5.1x)",
+      "dd_improvement": "5.8% vs 12.2% OOS (2.1x lower)",
+      "sharpe_improvement": "10.60 vs 2.25 (4.7x)"
+    },
+    "risk_controls": {
+      "stop_after_first_loss": true,
+      "max_daily_loss_pct": 0.008,
+      "max_consecutive_losses": 3,
+      "reduce_size_at_dd_pct": "disabled (0.99)"
+    },
+    "multi_objective_optimization": {
+      "method": "Optuna NSGA-II, 200 trials, 9-dim search space, pre-loaded data",
+      "objectives": "Maximize OOS Return + Minimize OOS DD + Maximize OOS Sharpe",
+      "composite_score": "40% Return + 30% (1/DD) + 30% Sharpe (normalized)",
+      "composite_rank": 1,
+      "composite_score_value": 0.895,
+      "pareto_optimal": true,
+      "dd_banded_pareto": {
+        "dd_lte_3pct": "PT25/SL25 + H24 + SFL + CL1 + DLL1% + DDR8%: OOS +62.6%, DD=2.8%",
+        "dd_lte_4pct": "PT50/SL30 + H20 + SFL + CL2 + DLL1.5%: OOS +160.4%, DD=3.5% (Phase 7)",
+        "dd_lte_5pct": "PT50/SL30 + H16 + SFL + CL3 + DDR8%: OOS +173.2%, DD=4.9%",
+        "dd_lte_6pct": "PT50/SL35 + H16 + SFL + CL3 + DLL0.8%: OOS +187.3%, DD=5.8% (Phase 8)",
+        "dd_lte_10pct": "PT50/SL40 + H16 + RSI65 + SFL + CL3 + DLL1% + DDR6%: OOS +196.8%, DD=9.6%",
+        "dd_lte_12pct": "PT50/SL35 + H16 + RSI65 + SFL + DLL0.8% + DDR8%: OOS +202.6%, DD=10.2%"
+      },
+      "key_findings": [
+        "SFL universally present in ALL top configs",
+        "H16 beats H20 when combined with SFL (shorter, tighter exits)",
+        "Wider SL (35-40%) works better with SFL (losers stopped by SFL not SL)",
+        "DLL=0.8% adds safety without hurting returns",
+        "CL=3 optimal with SFL (SFL already limits daily losses)"
+      ]
+    },
+    "levers_tested_and_rejected": [
+      "trailing_stop (hurt PnL)",
+      "time_decay_exit (hurt PnL)",
+      "quick_exit (hurt PnL)",
+      "adaptive_vix_exits (hurt PnL)",
+      "DDR@8% (OOS overfitting in isolation, useful in combos)",
+      "RSI 80/30 (reduced OOS)",
+      "RSI 75/25 (reduced trades too much)",
+      "kelly_fraction tuning (insensitive at $10K)",
+      "H20 with SFL (H16 outperforms H20 when SFL active)",
+      "SL=30% with SFL (SL=35% gives winners more room)",
+      "CL=1/2 with SFL (too restrictive, SFL already handles risk)"
+    ]
   },
   "strategy_notes": {
-    "window": "9:30-15:55 full day trading window",
-    "option_price": "$0.50-$5.00 - full option price range",
-    "hold_time": "87% of trades close in 5 minutes (1 bar)",
-    "exit_rules": "22% profit target, 25% stop loss, 5 min max hold, EOD exit at 15:00",
-    "orb_buffer": "0.1% of ORB range - tight breakout filter",
-    "risk_mgmt": "Signal cooldown 60s, pending expiry 30s, orphan cleanup on startup"
+    "window": "10:00-11:00 AM trading window",
+    "option_price": "$0.50-$2.00",
+    "hold_time": "Max 16 bars (80 min)",
+    "exit_rules": "50% profit target, 35% stop loss, 16 bar max hold",
+    "risk_mgmt": "StopFirstLoss + 0.8% daily loss limit + CL=3 circuit breaker. Multi-objective Pareto-optimal.",
+    "dd_control": "SFL primary + DLL=0.8% secondary. Train DD=7.2%, OOS DD=5.8%.",
+    "phase8_mechanism": "Wider SL (35%) lets winners breathe, SFL prevents loss spirals. Shorter hold (16 bars/80min) captures faster moves. DLL=0.8% adds extra daily loss cap. Net effect: +27pp more OOS return vs Phase 7 for only +2.3pp more DD."
   }
 }

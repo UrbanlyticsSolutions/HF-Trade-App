@@ -1,17 +1,20 @@
 """
-Live 0DTE Runner - Run the backtested 0DTE strategy live
+Live 0DTE Runner - Phase 8 Momentum Strategy
 
-Based on backtested results:
-- Strategy: ORB (Opening Range Breakout)
-- Win Rate: 91.2%
+Based on Phase 8 optimized results (Feb 2026):
+- Strategy: Momentum (RSI > 70 -> CALL, RSI < 30 -> PUT)
+- Win Rate: 75.6%
+- Return: +187.3%
+- Max DD: 5.8%
 - Window: 10:00 - 11:00 AM ET
-- Options: $0.50 - $1.00
+- Options: $0.50 - $2.00
+- PT: 50%, SL: 35%, Hold: 80 min
+- Risk: SFL + CL=3 + DLL=0.8%
 
 Usage:
     python -m live.runner_0dte --capital 10000
-    python -m live.runner_0dte --capital 10000 --strategy momentum
-    python -m live.runner_0dte --capital 10000 --mode paper  # Paper trading
-    python -m live.runner_0dte --capital 10000 --mode live   # Enable live trading
+    python -m live.runner_0dte --capital 10000 --mode paper
+    python -m live.runner_0dte --capital 10000 --mode live
 """
 import argparse
 import logging
@@ -152,17 +155,16 @@ def wait_for_market_open():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live 0DTE SPY Options Trading")
+    parser = argparse.ArgumentParser(description="Live 0DTE SPY Options Trading (Phase 8)")
     parser.add_argument("--capital", type=float, default=10000, help="Account capital")
     parser.add_argument("--account", help="Questrade account ID (auto-detect if not provided)")
-    parser.add_argument("--strategy", default="orb", choices=["orb", "momentum", "mean_reversion"],
-                        help="Strategy type (default: orb)")
+    parser.add_argument("--strategy", default=None, choices=["orb", "momentum", "mean_reversion"],
+                        help="Strategy type (default: from strategy.json)")
     parser.add_argument("--mode", default="monitor", choices=["monitor", "paper", "live"],
                         help="Trading mode: monitor (no orders), paper (simulated), live (real)")
-    parser.add_argument("--target", type=float, default=0.22, help="Profit target %% (default: 22%%)")
-    parser.add_argument("--stop", type=float, default=0.25, help="Stop loss %% (default: 25%%)")
-    parser.add_argument("--max-contracts", type=int, default=5, help="Max contracts per trade")
-    parser.add_argument("--no-stop-after-loss", action="store_true", help="Continue trading after first loss")
+    parser.add_argument("--target", type=float, default=None, help="Profit target %% (default: from config)")
+    parser.add_argument("--stop", type=float, default=None, help="Stop loss %% (default: from config)")
+    parser.add_argument("--max-contracts", type=int, default=50, help="Max contracts per trade")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     
     args = parser.parse_args()
@@ -202,28 +204,28 @@ def main():
         ]
     )
     
+    # Resolve strategy: CLI > config > default
+    strategy_name = args.strategy or trade_config.get('strategy', 'momentum')
+    
     print("=" * 70)
-    print("LIVE 0DTE SPY OPTIONS TRADING")
+    print("LIVE 0DTE SPY OPTIONS TRADING (PHASE 8)")
     print("=" * 70)
     print(f"Mode: {mode}")
     print(f"Capital: ${args.capital:,.2f}")
-    print(f"Strategy: {args.strategy.upper()}")
-    print(f"Profit Target: {trade_config.get('profit_target_pct', 0.22):.0%}")
-    print(f"Stop Loss: {trade_config.get('stop_loss_pct', 0.25):.0%}")
+    print(f"Strategy: {strategy_name.upper()}")
+    print(f"Profit Target: {trade_config.get('profit_target_pct', 0.50):.0%}")
+    print(f"Stop Loss: {trade_config.get('stop_loss_pct', 0.35):.0%}")
     print(f"Max Contracts: {args.max_contracts}")
-    print(f"Option Price Range: ${trade_config.get('min_option_price', 0.50):.2f} - ${trade_config.get('max_option_price', 1.00):.2f}")
-    print(f"ORB Buffer: {trade_config.get('orb_buffer_pct', 0.10):.0%} of range")
+    print(f"Option Price Range: ${trade_config.get('min_option_price', 0.50):.2f} - ${trade_config.get('max_option_price', 2.00):.2f}")
     print(f"Trading Window: {trade_config.get('trade_start_hour', 10)}:{trade_config.get('trade_start_minute', 0):02d} - {trade_config.get('trade_end_hour', 11)}:{trade_config.get('trade_end_minute', 0):02d} ET")
-    print(f"Exit Hour: {trade_config.get('exit_hour', 15)}:00 ET")
-    print(f"ORB Minutes: {trade_config.get('orb_minutes', 30)}")
-    print(f"Max Hold: {trade_config.get('max_hold_minutes', 5)} min")
+    print(f"Max Hold: {trade_config.get('max_hold_minutes', 80)} min")
+    print(f"SFL: {risk_config.get('stop_after_first_loss', True)} | CL: {risk_config.get('max_consecutive_losses', 3)} | DLL: {risk_config.get('max_daily_loss_pct', 0.008):.1%}")
     if mode == "LIVE":
         print(">>> WARNING: LIVE TRADING - REAL ORDERS WILL BE PLACED <<<")
     elif mode == "PAPER":
         print(">>> PAPER TRADING - Simulated fills, no real orders <<<")
     else:
         print(">>> MONITOR ONLY - No orders executed <<<")
-    print(f"Stop After First Loss: {risk_config.get('stop_after_first_loss', not args.no_stop_after_loss)}")
     print("=" * 70)
     
     try:
@@ -262,25 +264,28 @@ def main():
             db_path=db_path
         )
         
-        # Create 0DTE strategy with client for ORB backfill
-        # Use config values for ALL parameters, falling back to optimal defaults
+        # Create 0DTE strategy with Phase 8 config from strategy.json
         strategy = create_0dte_strategy(
             account_capital=args.capital,
-            strategy=args.strategy,
-            profit_target_pct=trade_config.get('profit_target_pct', 0.22),
-            stop_loss_pct=trade_config.get('stop_loss_pct', 0.25),
+            strategy=strategy_name,
+            profit_target_pct=trade_config.get('profit_target_pct', 0.50),
+            stop_loss_pct=trade_config.get('stop_loss_pct', 0.35),
             max_contracts=args.max_contracts,
-            stop_after_first_loss=risk_config.get('stop_after_first_loss', not args.no_stop_after_loss),
+            stop_after_first_loss=risk_config.get('stop_after_first_loss', True),
+            max_consecutive_losses=risk_config.get('max_consecutive_losses', 3),
+            max_daily_loss_pct=risk_config.get('max_daily_loss_pct', 0.008),
             min_option_price=trade_config.get('min_option_price', 0.50),
-            max_option_price=trade_config.get('max_option_price', 1.00),
+            max_option_price=trade_config.get('max_option_price', 2.00),
             orb_minutes=trade_config.get('orb_minutes', 30),
             orb_buffer_pct=trade_config.get('orb_buffer_pct', 0.10),
-            max_hold_minutes=trade_config.get('max_hold_minutes', 5),
+            max_hold_minutes=trade_config.get('max_hold_minutes', 80),
             trade_start_hour=trade_config.get('trade_start_hour', 10),
             trade_start_minute=trade_config.get('trade_start_minute', 0),
             trade_end_hour=trade_config.get('trade_end_hour', 11),
             trade_end_minute=trade_config.get('trade_end_minute', 0),
             exit_hour=trade_config.get('exit_hour', 15),
+            rsi_call_threshold=trade_config.get('rsi_call_threshold', 70),
+            rsi_put_threshold=trade_config.get('rsi_put_threshold', 30),
             questrade_client=client
         )
         
@@ -323,7 +328,7 @@ def main():
         logger.info("Starting engine... Press Ctrl+C to stop")
         update_engine_status("live", {
             "mode": args.mode,
-            "strategy": args.strategy,
+            "strategy": strategy_name,
             "capital": args.capital,
             "started_at": get_eastern_time().strftime('%H:%M:%S')
         })

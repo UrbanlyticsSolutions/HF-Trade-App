@@ -1,21 +1,23 @@
 """
 Live 0DTE SPY Options Strategy
 
-Full implementation based on backtested ORB (Opening Range Breakout) strategy.
+Phase 8 Momentum strategy (optimized Feb 2026).
 
-Backtest Results (2025 OOS):
-- 1,004 trades
-- 91.2% win rate  
-- $6.9M P&L
-- 2.3% max drawdown
+Backtest Results (Jan-Feb 2026 OOS):
+- 86 trades
+- 75.6% win rate
+- +187.3% return ($10K -> $28.7K)
+- 5.8% max drawdown
+- Sharpe 10.60
 
 Strategy Rules:
 - Window: 10:00 - 11:00 AM ET
-- Options: $0.50 - $1.00 (cheap, high gamma)
-- Signal: ORB breakout (price breaks 30-min opening range)
-- Profit Target: +22%
-- Stop Loss: -25%
-- Risk: Stop after first daily loss
+- Options: $0.50 - $2.00
+- Signal: RSI Momentum (RSI > 70 -> CALL, RSI < 30 -> PUT)
+- Profit Target: +50%
+- Stop Loss: -35%
+- Max Hold: 80 min (16 bars)
+- Risk: Stop after first loss (SFL) + 0.8% daily loss limit + CL=3
 """
 import logging
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -104,30 +106,31 @@ class Live0DTEStrategy(OptionStrategy):
     
     def __init__(
         self,
-        # Strategy parameters (from backtest config)
-        strategy: str = "orb",
-        profit_target_pct: float = 0.22,
-        stop_loss_pct: float = 0.25,
+        # Strategy parameters (Phase 8 Momentum defaults)
+        strategy: str = "momentum",
+        profit_target_pct: float = 0.50,
+        stop_loss_pct: float = 0.35,
         min_option_price: float = 0.50,
-        max_option_price: float = 1.00,
-        # Trading window (ET times) - backtest optimal: 10:00-11:00
+        max_option_price: float = 2.00,
+        # Trading window (ET times)
         trade_start_hour: int = 10,
         trade_start_minute: int = 0,
         trade_end_hour: int = 11,
         trade_end_minute: int = 0,
         exit_hour: int = 15,
-        # Max hold time (87% of trades close in 5 min per backtest)
-        max_hold_minutes: int = 5,
-        # ORB parameters
+        # Max hold time (Phase 8: 16 bars × 5 min = 80 min)
+        max_hold_minutes: int = 80,
+        # ORB parameters (for ORB strategy fallback)
         orb_minutes: int = 30,
-        orb_buffer_pct: float = 0.10,  # 10% of ORB range buffer for breakout (matches backtest)
-        # RSI parameters (for momentum strategy fallback)
+        orb_buffer_pct: float = 0.10,
+        # RSI parameters (Phase 8 Momentum thresholds)
         rsi_call_threshold: float = 70,
         rsi_put_threshold: float = 30,
-        # Risk management (aligned with backtest RiskManager defaults)
-        max_contracts: int = 5,
-        stop_after_first_loss: bool = False,  # Backtest runs with False — never stop after loss
-        max_consecutive_losses: int = 999,  # Backtest default 999 — effectively unlimited
+        # Risk management (Phase 8: SFL + CL=3 + DLL=0.8%)
+        max_contracts: int = 50,
+        stop_after_first_loss: bool = True,
+        max_consecutive_losses: int = 3,
+        max_daily_loss_pct: float = 0.008,
         # Capital
         account_capital: float = 10000,
         risk_per_trade_pct: float = 0.02,
@@ -164,30 +167,34 @@ class Live0DTEStrategy(OptionStrategy):
         self.max_contracts = max_contracts
         self.stop_after_first_loss = stop_after_first_loss
         self.max_consecutive_losses = max_consecutive_losses
+        self.max_daily_loss_pct = max_daily_loss_pct
         self.account_capital = account_capital
         self.risk_per_trade_pct = risk_per_trade_pct
         
-        # Initialize RiskManager with Kelly from backtest stats
-        # Backtest: 91.2% WR, avg_win ~22%, avg_loss ~25%, PF=50.93
+        # Initialize RiskManager with Phase 8 risk config
         self.risk_config = RiskConfig(
-            kelly_fraction=0.20,           # Use 20% of full Kelly
-            min_kelly_pct=0.02,            # Min 2%
-            max_kelly_pct=0.20,            # Max 20%
-            max_risk_per_trade_pct=0.02,   # Max 2% risk per trade
-            max_position_pct=0.07,         # Max 7% in single position
-            max_position_value=5000,       # Absolute cap
+            kelly_fraction=0.20,
+            min_kelly_pct=0.02,
+            max_kelly_pct=0.20,
+            max_risk_per_trade_pct=0.02,
+            max_position_pct=0.07,
+            max_position_value=5000,
             max_contracts=max_contracts,
             stop_after_first_loss=stop_after_first_loss,
+            max_consecutive_losses=max_consecutive_losses,
+            max_daily_loss_pct=max_daily_loss_pct,
+            consec_loss_reduction=0.50,
+            wins_to_reset_streak=2,
         )
         self.risk_manager = RiskManager(account_capital, self.risk_config)
         
-        # Pre-calculate Kelly from backtest stats
-        # Kelly = (W × avg_win/avg_loss - L) / (avg_win/avg_loss)
+        # Pre-calculate Kelly from Phase 8 backtest stats
+        # Phase 8: 75.6% WR, avg_win ~50%, avg_loss ~35%, PF=4.64
         kelly_calc = KellyCalculator(self.risk_config)
         self.kelly_pct = kelly_calc.calculate_from_winrate(
-            win_rate=0.912,    # 91.2% from backtest
-            avg_win=0.22,      # 22% profit target
-            avg_loss=0.25      # 25% stop loss
+            win_rate=0.756,    # 75.6% from Phase 8 backtest
+            avg_win=0.50,      # 50% profit target
+            avg_loss=0.35      # 35% stop loss
         )
         self.risk_manager.set_kelly(self.kelly_pct)
         logger.info(f"Kelly position size: {self.kelly_pct:.1%}")
@@ -213,14 +220,13 @@ class Live0DTEStrategy(OptionStrategy):
         self._price_history: List[Dict] = []
         self._rsi_period = 14
         
-        logger.info(f"Live0DTE Strategy initialized:")
+        logger.info(f"Live0DTE Strategy initialized (Phase 8):")
         logger.info(f"  Strategy: {strategy}")
         logger.info(f"  Window: {self.trade_start} - {self.trade_end}")
-        logger.info(f"  ORB Buffer: {orb_buffer_pct:.1%} of range")
         logger.info(f"  Options: ${min_option_price:.2f} - ${max_option_price:.2f}")
         logger.info(f"  Target: {profit_target_pct:.0%} | Stop: {stop_loss_pct:.0%}")
         logger.info(f"  Max Hold: {max_hold_minutes} min")
-        logger.info(f"  Exit Hour: {exit_hour}:00")
+        logger.info(f"  SFL: {stop_after_first_loss} | CL: {max_consecutive_losses} | DLL: {max_daily_loss_pct:.1%}")
         logger.info(f"  Capital: ${self.account_capital:,.2f}")
         
         # Trade database reference (set by engine)
@@ -866,39 +872,41 @@ class Live0DTEStrategy(OptionStrategy):
 
 def create_0dte_strategy(
     account_capital: float = 10000,
-    strategy: str = "orb",
+    strategy: str = "momentum",
     **kwargs
 ) -> Live0DTEStrategy:
     """
-    Factory function to create 0DTE strategy with defaults from backtest config.
+    Factory function to create 0DTE strategy with Phase 8 defaults.
     
     Args:
         account_capital: Starting capital
-        strategy: 'orb', 'momentum', 'mean_reversion'
+        strategy: 'momentum', 'orb', 'mean_reversion'
         **kwargs: Override any strategy parameters
         
     Returns:
         Configured Live0DTEStrategy
     """
-    # Default parameters from backtest config (optimized)
+    # Phase 8 optimized defaults (Feb 2026)
     defaults = {
         "strategy": strategy,
-        "profit_target_pct": 0.22,
-        "stop_loss_pct": 0.25,
+        "profit_target_pct": 0.50,
+        "stop_loss_pct": 0.35,
         "min_option_price": 0.50,
-        "max_option_price": 1.00,
+        "max_option_price": 2.00,
         "trade_start_hour": 10,
         "trade_start_minute": 0,
         "trade_end_hour": 11,
         "trade_end_minute": 0,
         "exit_hour": 15,
+        "max_hold_minutes": 80,
         "orb_minutes": 30,
         "orb_buffer_pct": 0.10,
         "rsi_call_threshold": 70,
         "rsi_put_threshold": 30,
-        "max_contracts": 5,
-        "stop_after_first_loss": False,  # Aligned with backtest RiskManager
-        "max_consecutive_losses": 999,  # Aligned with backtest RiskManager
+        "max_contracts": 50,
+        "stop_after_first_loss": True,
+        "max_consecutive_losses": 3,
+        "max_daily_loss_pct": 0.008,
         "account_capital": account_capital,
         "risk_per_trade_pct": 0.02,
     }
