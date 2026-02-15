@@ -580,7 +580,7 @@ def create_pnl_bars(state):
     # Skip first entry (initial capital with pnl=0)
     trades = [t for t in equity_curve if t.get('trade_id', 0) > 0]
     
-    # If no trades from state, get from DB
+    # If no trades from state, get ALL from DB
     if not trades:
         db_path = Path(__file__).parent / "data" / "live_0dte_trades.db"
         if db_path.exists():
@@ -588,28 +588,27 @@ def create_pnl_bars(state):
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT id, symbol, pnl 
+                    SELECT id, symbol, pnl, exit_time
                     FROM trades 
                     WHERE status = 'closed' AND pnl IS NOT NULL 
-                    ORDER BY exit_time DESC
-                    LIMIT 20
+                    ORDER BY exit_time
                 """)
                 db_trades = cursor.fetchall()
                 conn.close()
                 
                 trades = []
-                for trade_id, symbol, pnl in reversed(db_trades):
+                for trade_id, symbol, pnl, exit_time in db_trades:
                     opt_type = get_option_type_from_symbol(symbol)
                     trades.append({
                         "trade_id": trade_id,
                         "type": opt_type,
-                        "pnl": pnl
+                        "pnl": pnl,
+                        "time": exit_time
                     })
             except:
                 pass
-    else:
-        trades = trades[-20:]  # Last 20
     
+    x_range = None
     if not trades:
         fig = go.Figure()
         fig.add_annotation(text="No trade data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(color='#888'))
@@ -617,32 +616,103 @@ def create_pnl_bars(state):
         pnls = [t.get('pnl', 0) for t in trades]
         types = [t.get('type', '-') for t in trades]
         trade_ids = [t.get('trade_id', 0) for t in trades]
+        times = [t.get('time') for t in trades]
+        
+        # Cumulative P&L for running total line
+        cum_pnl = []
+        running = 0
+        for p in pnls:
+            running += p
+            cum_pnl.append(running)
         
         # Green for profit, red for loss
         colors = ['#00ff88' if p > 0 else '#ff4757' for p in pnls]
         
+        # Use trade numbers for x-axis
+        x_vals = list(range(1, len(trades) + 1))
+        
         fig = go.Figure()
+        
+        # P&L bars
         fig.add_trace(go.Bar(
-            x=list(range(1, len(trades) + 1)),
+            x=x_vals,
             y=pnls,
             marker_color=colors,
             text=[f"${p:+.0f}" for p in pnls],
             textposition='outside',
+            textfont=dict(size=9),
             hovertemplate='Trade #%{customdata[0]}<br>Type: %{customdata[1]}<br>P&L: $%{y:.2f}<extra></extra>',
-            customdata=list(zip(trade_ids, types))
+            customdata=list(zip(trade_ids, types)),
+            name='P&L'
         ))
+        
+        # Cumulative P&L line
+        fig.add_trace(go.Scatter(
+            x=x_vals,
+            y=cum_pnl,
+            mode='lines',
+            line=dict(color='#00d9ff', width=2),
+            yaxis='y2',
+            name='Cumulative',
+            hovertemplate='Cumulative: $%{y:+,.0f}<extra></extra>'
+        ))
+        
+        # Zero line
+        fig.add_hline(y=0, line_dash="dot", line_color="#555", line_width=1)
+        
+        # Default view: last 30 trades with rangeslider to see all
+        num_trades = len(trades)
+        x_range = [max(1, num_trades - 29), num_trades + 1] if num_trades > 30 else None
     
     fig.update_layout(
-        title="Trade P&L",
+        title=f"Trade P&L ({len(trades) if trades else 0} trades)",
         template="plotly_dark",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=40, r=20, t=40, b=30),
-        xaxis_title="",
-        yaxis_title="",
-        yaxis_tickprefix="$",
+        margin=dict(l=50, r=50, t=40, b=40),
         showlegend=False,
-        height=280
+        height=350,
+        xaxis=dict(
+            title="Trade #",
+            title_font=dict(size=11, color='#888'),
+            range=x_range,
+            rangeslider=dict(visible=True, thickness=0.08, bgcolor='rgba(50,50,50,0.3)'),
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(100,100,100,0.2)',
+            tickfont=dict(size=10, color='#aaa'),
+            showspikes=True,
+            spikecolor='#00d9ff',
+            spikethickness=1,
+            spikedash='dot',
+            spikemode='across'
+        ),
+        yaxis=dict(
+            title="P&L ($)",
+            title_font=dict(size=11, color='#888'),
+            tickprefix="$",
+            tickformat="+,.0f",
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(100,100,100,0.2)',
+            tickfont=dict(size=10, color='#aaa'),
+            zeroline=True,
+            zerolinecolor='#555',
+            fixedrange=False
+        ),
+        yaxis2=dict(
+            title="Cumulative ($)",
+            title_font=dict(size=11, color='#00d9ff'),
+            tickprefix="$",
+            tickformat="+,.0f",
+            overlaying='y',
+            side='right',
+            showgrid=False,
+            tickfont=dict(size=10, color='#00d9ff'),
+            fixedrange=False
+        ),
+        hovermode='x unified',
+        dragmode='zoom'
     )
     return fig
 
@@ -1050,12 +1120,12 @@ def serve_layout():
         # Charts Row
         html.Div([
             html.Div([
-                dcc.Graph(id='equity-chart', config={'displayModeBar': False}, style={'height': '300px'})
+                dcc.Graph(id='equity-chart', config={'displayModeBar': True, 'modeBarButtonsToRemove': ['lasso2d', 'select2d'], 'displaylogo': False}, style={'height': '300px'})
             ], className='chart-container', style={'flex': '2', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '8px', 'minWidth': '280px'}),
             
             html.Div([
-                dcc.Graph(id='pnl-chart', config={'displayModeBar': False}, style={'height': '300px'})
-            ], className='chart-container', style={'flex': '1', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '8px', 'minWidth': '280px'}),
+                dcc.Graph(id='pnl-chart', config={'displayModeBar': True, 'modeBarButtonsToRemove': ['lasso2d', 'select2d'], 'displaylogo': False}, style={'height': '350px'})
+            ], className='chart-container', style={'flex': '1', 'background': 'rgba(255,255,255,0.05)', 'borderRadius': '12px', 'padding': '8px', 'minWidth': '400px'}),
         ], className='charts-row', style={'display': 'flex', 'gap': '10px', 'marginBottom': '15px', 'flexWrap': 'wrap'}),
         
         # Trades Table
