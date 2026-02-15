@@ -913,7 +913,7 @@ def serve_layout():
         
         # Configuration Panel (hidden by default)
         html.Div(id='config-panel', children=[
-            html.H3("Strategy Configuration", style={'marginBottom': '15px', 'color': '#00d9ff'}),
+            html.H3("Strategy Configuration — Phase 8 Momentum", style={'marginBottom': '15px', 'color': '#00d9ff'}),
             html.Div([
                 # Risk Config
                 html.Div([
@@ -1409,7 +1409,7 @@ def load_config_values(n_clicks):
         trade_cfg.get('min_option_price', 0.50),
         trade_cfg.get('max_option_price', 2.00),
         risk_cfg.get('max_consecutive_losses', 3),
-        risk_cfg.get('max_daily_loss_pct', 0.8)
+        risk_cfg.get('max_daily_loss_pct', 0.008) * 100  # Convert 0.008 -> 0.8 for display
     )
 
 
@@ -1449,7 +1449,7 @@ def save_config_and_restart(n_clicks, stop_after_first_loss, kelly_fraction, max
             'kelly_fraction': kelly_fraction,
             'max_position_value': max_position_value,
             'max_consecutive_losses': max_consec_losses,
-            'max_daily_loss_pct': max_daily_loss
+            'max_daily_loss_pct': max_daily_loss / 100 if max_daily_loss else 0.008  # Convert 0.8 -> 0.008 for storage
         }
         
         # Save config
