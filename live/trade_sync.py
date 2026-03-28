@@ -70,16 +70,17 @@ class TradeSync:
         if not symbol:
             return symbol
 
-        # Questrade-style: SPY18Mar26P664.00
+        # Questrade-style: SPY18Mar26P664.00 (format: underlying+YY+Mon+DD+Right+strike)
+        # Example: SPY18Mar26P664.00 = SPY + year(18) + month(Mar) + day(26) + P + strike(664)
         m = re.match(
             r'^([A-Z]+)(\d{2})([A-Za-z]{3})(\d{2})([CP])(\d+\.?\d*)$',
             symbol,
         )
         if m:
-            underlying, day, mon_str, yr, right, strike = m.groups()
+            underlying, year, mon_str, day, right, strike = m.groups()
             month = TradeSync._MONTH_MAP.get(mon_str, "01")
             strike_clean = str(int(float(strike)))  # "664.00" -> "664"
-            return f"{underlying}20{yr}{month}{day}{right}{strike_clean}"
+            return f"{underlying}20{year}{month}{day}{right}{strike_clean}"
 
         # IBKR / OCC: SPY20260318P664 — already canonical, just strip decimals
         m2 = re.match(r'^([A-Z]+)(\d{8})([CP])(\d+\.?\d*)$', symbol)

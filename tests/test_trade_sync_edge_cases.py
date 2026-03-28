@@ -98,6 +98,7 @@ def _engine_with_mocks(db, positions_data=None, executions=None,
     mock_client.get_account_positions.return_value = positions_data or []
     mock_client.get_executions.return_value = executions or []
     mock_client.cancel_all_open_orders.return_value = None
+    mock_client.get_quote_by_symbol.return_value = None
 
     pos_mgr = MagicMock(spec=PositionManager)
     pos_mgr.sync_positions.return_value = None
