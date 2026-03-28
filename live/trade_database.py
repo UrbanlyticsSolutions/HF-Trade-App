@@ -11,6 +11,7 @@ Stores all trade information including:
 import sqlite3
 import json
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -88,6 +89,7 @@ class TradeDatabase:
     
     def __init__(self, db_path: str = "live_trades.db"):
         self.db_path = Path(db_path)
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self._init_tables()
@@ -213,6 +215,35 @@ class TradeDatabase:
             )
         ''')
         
+        # Broker account balance history — real IBKR balance over time
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS balance_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                account_id TEXT,
+                net_liquidation REAL NOT NULL,
+                cash REAL,
+                positions_value REAL,
+                unrealized_pnl REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Current IBKR positions — replaced on every sync for dashboard display
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS current_positions (
+                symbol TEXT PRIMARY KEY,
+                quantity INTEGER NOT NULL,
+                avg_cost REAL,
+                current_price REAL,
+                market_value REAL,
+                unrealized_pnl REAL,
+                is_option INTEGER DEFAULT 0,
+                option_type TEXT,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
         # Indexes
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
@@ -220,6 +251,7 @@ class TradeDatabase:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy_name)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_quotes_symbol ON quote_snapshots(symbol, timestamp)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_balance_history_ts ON balance_history(timestamp)')
         
         self.conn.commit()
     
@@ -227,31 +259,32 @@ class TradeDatabase:
     
     def insert_trade(self, trade: Trade) -> int:
         """Insert a new trade and return its ID"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO trades (
-                symbol, underlying, trade_type, option_type, strike, expiration,
-                action, quantity, entry_price, entry_time, exit_price, exit_time,
-                status, pnl, pnl_percent, commission, delta, gamma, theta, vega, iv,
-                underlying_price_entry, underlying_price_exit, entry_order_id, exit_order_id,
-                strategy_name, strategy_params, notes, account_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            trade.symbol, trade.underlying, trade.trade_type, trade.option_type,
-            trade.strike, trade.expiration, trade.action, trade.quantity,
-            trade.entry_price, trade.entry_time, trade.exit_price, trade.exit_time,
-            trade.status, trade.pnl, trade.pnl_percent, trade.commission,
-            trade.delta, trade.gamma, trade.theta, trade.vega, trade.iv,
-            trade.underlying_price_entry, trade.underlying_price_exit,
-            trade.entry_order_id, trade.exit_order_id,
-            trade.strategy_name, trade.strategy_params, trade.notes, trade.account_id
-        ))
-        
-        self.conn.commit()
-        trade_id = cursor.lastrowid
-        logger.info(f"Inserted trade {trade_id}: {trade.action} {trade.quantity} {trade.symbol} @ {trade.entry_price}")
-        return trade_id
+        with self._lock:
+            cursor = self.conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO trades (
+                    symbol, underlying, trade_type, option_type, strike, expiration,
+                    action, quantity, entry_price, entry_time, exit_price, exit_time,
+                    status, pnl, pnl_percent, commission, delta, gamma, theta, vega, iv,
+                    underlying_price_entry, underlying_price_exit, entry_order_id, exit_order_id,
+                    strategy_name, strategy_params, notes, account_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                trade.symbol, trade.underlying, trade.trade_type, trade.option_type,
+                trade.strike, trade.expiration, trade.action, trade.quantity,
+                trade.entry_price, trade.entry_time, trade.exit_price, trade.exit_time,
+                trade.status, trade.pnl, trade.pnl_percent, trade.commission,
+                trade.delta, trade.gamma, trade.theta, trade.vega, trade.iv,
+                trade.underlying_price_entry, trade.underlying_price_exit,
+                trade.entry_order_id, trade.exit_order_id,
+                trade.strategy_name, trade.strategy_params, trade.notes, trade.account_id
+            ))
+            
+            self.conn.commit()
+            trade_id = cursor.lastrowid
+            logger.info(f"Inserted trade {trade_id}: {trade.action} {trade.quantity} {trade.symbol} @ {trade.entry_price}")
+            return trade_id
     
     def update_trade(self, trade_id: int, **updates) -> bool:
         """Update trade fields"""
@@ -263,9 +296,10 @@ class TradeDatabase:
         set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
         values = list(updates.values()) + [trade_id]
         
-        cursor = self.conn.cursor()
-        cursor.execute(f"UPDATE trades SET {set_clause} WHERE id = ?", values)
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(f"UPDATE trades SET {set_clause} WHERE id = ?", values)
+            self.conn.commit()
         
         return cursor.rowcount > 0
     
@@ -309,6 +343,12 @@ class TradeDatabase:
         # Update daily P&L
         self._update_daily_pnl(exit_time[:10], pnl, is_win=(pnl > 0))
         
+        # Export updated trades to CSV for external sync
+        try:
+            self.export_trades_csv()
+        except Exception as csv_err:
+            logger.debug(f"CSV export after close_trade skipped: {csv_err}")
+        
         logger.info(f"Closed trade {trade_id}: P&L ${pnl:.2f} ({pnl_percent:.2f}%)")
         return self.get_trade(trade_id)
     
@@ -316,6 +356,16 @@ class TradeDatabase:
         """Get trade by ID"""
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_trade_by_order_id(self, order_id: int) -> Optional[Dict]:
+        """Get trade by entry or exit order ID."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM trades WHERE entry_order_id = ? OR exit_order_id = ?",
+            (order_id, order_id),
+        )
         row = cursor.fetchone()
         return dict(row) if row else None
     
@@ -501,29 +551,30 @@ class TradeDatabase:
     
     def _update_daily_pnl(self, date: str, pnl: float, is_win: bool):
         """Update daily P&L summary"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("SELECT * FROM daily_pnl WHERE date = ?", (date,))
-        row = cursor.fetchone()
-        
-        if row:
-            cursor.execute('''
-                UPDATE daily_pnl SET
-                    realized_pnl = realized_pnl + ?,
-                    total_pnl = realized_pnl + unrealized_pnl,
-                    trades_closed = trades_closed + 1,
-                    win_count = win_count + ?,
-                    loss_count = loss_count + ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE date = ?
-            ''', (pnl, 1 if is_win else 0, 0 if is_win else 1, date))
-        else:
-            cursor.execute('''
-                INSERT INTO daily_pnl (date, realized_pnl, total_pnl, trades_closed, win_count, loss_count)
-                VALUES (?, ?, ?, 1, ?, ?)
-            ''', (date, pnl, pnl, 1 if is_win else 0, 0 if is_win else 1))
-        
-        self.conn.commit()
+        with self._lock:
+            cursor = self.conn.cursor()
+            
+            cursor.execute("SELECT * FROM daily_pnl WHERE date = ?", (date,))
+            row = cursor.fetchone()
+            
+            if row:
+                cursor.execute('''
+                    UPDATE daily_pnl SET
+                        realized_pnl = realized_pnl + ?,
+                        total_pnl = (realized_pnl + ?) + unrealized_pnl,
+                        trades_closed = trades_closed + 1,
+                        win_count = win_count + ?,
+                        loss_count = loss_count + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE date = ?
+                ''', (pnl, pnl, 1 if is_win else 0, 0 if is_win else 1, date))
+            else:
+                cursor.execute('''
+                    INSERT INTO daily_pnl (date, realized_pnl, total_pnl, trades_closed, win_count, loss_count)
+                    VALUES (?, ?, ?, 1, ?, ?)
+                ''', (date, pnl, pnl, 1 if is_win else 0, 0 if is_win else 1))
+            
+            self.conn.commit()
     
     def update_unrealized_pnl(self, date: str, unrealized_pnl: float):
         """Update unrealized P&L for a date"""
@@ -620,11 +671,131 @@ class TradeDatabase:
             "profit_factor": round(profit_factor, 2) if profit_factor != float('inf') else "∞"
         }
     
+    # ==================== BROKER BALANCE HISTORY ====================
+
+    def record_balance(
+        self,
+        account_id: str,
+        net_liquidation: float,
+        cash: Optional[float] = None,
+        positions_value: Optional[float] = None,
+        unrealized_pnl: Optional[float] = None,
+    ) -> int:
+        """Record a broker balance snapshot (called periodically by engine)."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT INTO balance_history (
+                    timestamp, account_id, net_liquidation, cash, positions_value, unrealized_pnl
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                datetime.now().isoformat(),
+                account_id,
+                net_liquidation,
+                cash,
+                positions_value,
+                unrealized_pnl,
+            ))
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def get_balance_history(self, limit: int = 500) -> List[Dict]:
+        """Get recent balance history records."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM balance_history ORDER BY timestamp DESC LIMIT ?",
+            (limit,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_latest_balance(self) -> Optional[Dict]:
+        """Get the most recent balance record."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM balance_history ORDER BY timestamp DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    # ==================== CURRENT POSITIONS ====================
+
+    def update_current_positions(self, positions: list) -> None:
+        """Replace all current positions with fresh snapshot from broker."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute('DELETE FROM current_positions')
+            for p in positions:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO current_positions
+                        (symbol, quantity, avg_cost, current_price, market_value,
+                         unrealized_pnl, is_option, option_type, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    p.symbol, p.quantity, p.avg_cost, p.current_price,
+                    p.market_value, p.unrealized_pnl,
+                    1 if p.is_option else 0, p.option_type, now,
+                ))
+            self.conn.commit()
+
+    def get_current_positions(self) -> List[Dict]:
+        """Get the latest broker positions snapshot."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('SELECT * FROM current_positions ORDER BY symbol')
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+
     def close(self):
         """Close database connection"""
         if self.conn:
             self.conn.close()
             logger.info("Trade database closed")
+
+    # ==================== CSV EXPORT ====================
+
+    def export_trades_csv(self, csv_path: str = None) -> str:
+        """Export all closed trades to CSV file.
+
+        Called automatically after each trade closes so the CSV stays
+        up-to-date for external sync (e.g. gcloud_trades.csv).
+
+        Args:
+            csv_path: Output file path. Defaults to data/gcloud_trades.csv.
+
+        Returns:
+            Path to the written CSV file.
+        """
+        import csv as csv_mod
+
+        if csv_path is None:
+            csv_path = str(self.db_path.parent / "gcloud_trades.csv")
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT symbol, underlying, trade_type, option_type, strike,
+                   expiration, action, quantity, entry_price, entry_time,
+                   exit_price, exit_time, status, pnl, pnl_percent,
+                   commission, strategy_name, account_id, notes
+            FROM trades
+            WHERE status = 'closed' AND pnl IS NOT NULL
+            ORDER BY exit_time
+        """)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+
+        try:
+            with open(csv_path, "w", newline="") as f:
+                writer = csv_mod.writer(f)
+                writer.writerow(columns)
+                for row in rows:
+                    writer.writerow(row)
+            logger.info(f"Exported {len(rows)} trades to {csv_path}")
+        except Exception as e:
+            logger.warning(f"Failed to export trades CSV: {e}")
+
+        return csv_path
     
     def __enter__(self):
         return self

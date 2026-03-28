@@ -1,0 +1,115 @@
+# Deploy to GCloud VM on push to main
+# Requires GitHub Secrets:
+#   GCP_SA_KEY        — base64-encoded service account JSON key
+#   GCP_PROJECT_ID    — stock-479103
+#   GCP_VM_ZONE       — us-east1-b
+#   VM_ENV_FILE       — contents of deploy/.env (IB creds, passwords, etc.)
+name: Deploy to GCloud
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false  # Never cancel a running deploy
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short -x
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Create deployment tarball
+        run: |
+          tar czf /tmp/trading-app.tar.gz \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='output' \
+            --exclude='.git' \
+            --exclude='*.db' \
+            --exclude='*.db-journal' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            .
+
+      - name: Upload to VM
+        run: |
+          gcloud compute scp /tmp/trading-app.tar.gz \
+            ib-trading:/home/Kaiqi/trading-app.tar.gz \
+            --zone=${{ secrets.GCP_VM_ZONE }}
+
+      - name: Write .env file on VM
+        run: |
+          # Write env file from secret (avoids committing credentials)
+          gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} --command="
+            cat > /home/Kaiqi/trading-app/.env << 'ENVEOF'
+          ${{ secrets.VM_ENV_FILE }}
+          ENVEOF
+          "
+
+      - name: Deploy on VM
+        run: |
+          gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} --command="
+            set -e
+            cd /home/Kaiqi/trading-app
+
+            # Extract new code
+            tar xzf /home/Kaiqi/trading-app.tar.gz
+            rm /home/Kaiqi/trading-app.tar.gz
+
+            # Rebuild and restart only the app container (keep IB Gateway running)
+            cd deploy
+            docker compose build app
+            docker compose up -d app
+
+            echo '=== Deployment complete ==='
+            docker compose ps
+            echo ''
+            echo '=== Recent app logs ==='
+            docker compose logs --tail=20 app
+          "
+
+      - name: Print deployment info
+        if: always()
+        run: |
+          EXTERNAL_IP=$(gcloud compute instances describe ib-trading \
+            --zone=${{ secrets.GCP_VM_ZONE }} \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **VM**: ib-trading (${{ secrets.GCP_VM_ZONE }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **IP**: ${EXTERNAL_IP}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dashboard**: http://${EXTERNAL_IP}:8040" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Time**: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY

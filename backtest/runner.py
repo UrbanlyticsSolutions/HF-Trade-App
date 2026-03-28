@@ -15,9 +15,12 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from backtest.engine import Backtest0DTE, TradeConfig
 from core.risk_manager import RiskConfig
+from config import defaults as cfg
 
 
-def plot_results(trades, underlying_df):
+def plot_results(trades, underlying_df, initial_capital=None):
+    if initial_capital is None:
+        initial_capital = cfg.initial_capital()
     """Plot daily SPY price chart with trades, equity curve, and drawdown"""
     import matplotlib.dates as mdates
     
@@ -85,21 +88,21 @@ def plot_results(trades, underlying_df):
     # ============================================
     ax2 = axes[1]
     
-    capitals = [10000] + [t.capital for t in trades]
+    capitals = [initial_capital] + [t.capital for t in trades]
     trade_indices = list(range(len(capitals)))
     
     # Color equity curve based on trend
     ax2.plot(trade_indices, capitals, 'b-', linewidth=2)
-    ax2.fill_between(trade_indices, 10000, capitals, where=[c >= 10000 for c in capitals], 
+    ax2.fill_between(trade_indices, initial_capital, capitals, where=[c >= initial_capital for c in capitals], 
                      color='green', alpha=0.3, interpolate=True)
-    ax2.fill_between(trade_indices, 10000, capitals, where=[c < 10000 for c in capitals], 
+    ax2.fill_between(trade_indices, initial_capital, capitals, where=[c < initial_capital for c in capitals], 
                      color='red', alpha=0.3, interpolate=True)
     
     # Mark key points
-    ax2.axhline(y=10000, color='gray', linestyle='--', alpha=0.5, label='Initial $10K')
+    ax2.axhline(y=initial_capital, color='gray', linestyle='--', alpha=0.5, label=f'Initial ${initial_capital:,.0f}')
     
     # Find max drawdown point
-    peak = 10000
+    peak = initial_capital
     max_dd = 0
     max_dd_idx = 0
     for i, cap in enumerate(capitals):
@@ -115,7 +118,7 @@ def plot_results(trades, underlying_df):
                  xytext=(max_dd_idx + 10, capitals[max_dd_idx] * 0.9),
                  fontsize=10, color='red', fontweight='bold')
     
-    final_return = (capitals[-1] / 10000 - 1) * 100
+    final_return = (capitals[-1] / initial_capital - 1) * 100
     ax2.set_title(f'Equity Curve | Final: ${capitals[-1]:,.0f} (+{final_return:.0f}%)', fontsize=14, fontweight='bold')
     ax2.set_xlabel('Trade #')
     ax2.set_ylabel('Capital ($)')
@@ -127,7 +130,7 @@ def plot_results(trades, underlying_df):
     # ============================================
     ax3 = axes[2]
     
-    peak = 10000
+    peak = initial_capital
     drawdowns = []
     for cap in capitals:
         if cap > peak:
@@ -178,7 +181,7 @@ def load_config_from_json(json_path: str = "config/strategy.json"):
 
 def run_backtest(trade_cfg: TradeConfig, risk_cfg: RiskConfig, backtest_cfg: dict, plot: bool = True):
     """Run backtest with given configuration"""
-    initial_capital = backtest_cfg.get('initial_capital', 10000)
+    initial_capital = backtest_cfg.get('initial_capital', cfg.initial_capital())
     
     bt = Backtest0DTE(trade_cfg, risk_cfg, initial_capital=initial_capital)
 
@@ -305,7 +308,7 @@ def run_backtest(trade_cfg: TradeConfig, risk_cfg: RiskConfig, backtest_cfg: dic
             (full_underlying['date'] >= test_start) & 
             (full_underlying['date'] <= test_end)
         ]
-        plot_results(trades, full_underlying)
+        plot_results(trades, full_underlying, initial_capital=initial_capital)
     
     return trades
 
@@ -343,13 +346,13 @@ def main():
             max_risk_per_trade_pct=0.02,
             max_position_pct=0.07,
             max_position_value=5000,
-            stop_after_first_loss=True,
+            max_daily_losses=2,
             max_consecutive_losses=2,
             reduce_size_at_dd_pct=0.05,
         )
         
         backtest_cfg = {
-            'initial_capital': 10000,
+            'initial_capital': cfg.initial_capital(),
             'train_start': '2023-01-01',
             'train_end': '2023-12-31',
             'test_start': '2024-01-01',

@@ -93,6 +93,15 @@ def compute_features(df: pd.DataFrame, orb_minutes: int = 30) -> pd.DataFrame:
     
     # ===== Momentum =====
     df['momentum'] = df['close'].pct_change(5) * 100
+    df['momentum_3'] = df['close'].pct_change(3) * 100
+    
+    # ===== VWAP distance (alias for post-loss strategies) =====
+    df['vwap_distance'] = df['vwap_dev_pct']
+    
+    # ===== Trend strength (EMA8 vs EMA21) =====
+    ema8 = df['close'].ewm(span=8).mean()
+    ema21 = df['close'].ewm(span=21).mean()
+    df['trend_strength'] = (ema8 - ema21) / df['close'] * 100
     
     # ===== Volume ratio =====
     df['vol_ratio'] = df['volume'] / df['volume'].rolling(20).mean()

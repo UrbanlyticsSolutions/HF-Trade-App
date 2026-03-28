@@ -63,13 +63,28 @@ def main():
     
     try:
         # Import after path setup
+        from clients.ibkr_adapter import create_ibkr_client
         from clients.questrade_client import create_questrade_client
         from live.engine import create_engine, EngineConfig
         from live.strategy import CoveredCallStrategy, PutCreditSpreadStrategy
+        from config.defaults import ibkr_live_port, ibkr_paper_port
         
-        # Create Questrade client
-        logger.info("Connecting to Questrade...")
-        client = create_questrade_client(refresh_token=args.refresh_token)
+        # Connect IBKR (primary — orders, positions, account, quotes)
+        logger.info("Connecting to IBKR (primary broker)...")
+        env_host = os.environ.get("IBKR_HOST")
+        env_port = os.environ.get("IBKR_LIVE_PORT") if args.mode == "live" else os.environ.get("IBKR_PAPER_PORT")
+        ibkr_port = int(env_port) if env_port else (ibkr_live_port() if args.mode == "live" else ibkr_paper_port())
+        client = create_ibkr_client(port=ibkr_port, host=env_host)
+        
+        # Questrade for option chains only
+        chains_client = None
+        try:
+            qt = create_questrade_client(refresh_token=args.refresh_token)
+            qt.get_accounts()
+            chains_client = qt
+            logger.info("Questrade connected (option chains only)")
+        except Exception as qe:
+            logger.warning(f"Questrade unavailable: {qe} — IBKR will handle option chains too")
         
         # Verify connection
         accounts = client.get_accounts()
@@ -83,12 +98,13 @@ def main():
         
         # Create engine
         engine = create_engine(
-            questrade_client=client,
+            client=client,
             account_id=args.account,
             symbols=symbols,
             option_underlyings=option_underlyings,
             mode=args.mode,
-            db_path=args.db
+            db_path=args.db,
+            chains_client=chains_client
         )
         
         # Update config
@@ -128,12 +144,16 @@ def run_monitor(account_id: str, symbols: List[str] = None, option_underlyings: 
         from live.runner import run_monitor
         run_monitor("12345678", symbols=["AAPL", "MSFT"], option_underlyings=["SPY"])
     """
-    from clients.questrade_client import create_questrade_client
+    from clients.ibkr_adapter import create_ibkr_client
     from live.engine import create_engine
+    from config.defaults import ibkr_paper_port
     
-    client = create_questrade_client()
+    env_host = os.environ.get("IBKR_HOST")
+    env_port = os.environ.get("IBKR_PAPER_PORT")
+    port = int(env_port) if env_port else ibkr_paper_port()
+    client = create_ibkr_client(port=port, host=env_host)
     engine = create_engine(
-        questrade_client=client,
+        client=client,
         account_id=account_id,
         symbols=symbols,
         option_underlyings=option_underlyings,
@@ -152,36 +172,17 @@ def run_with_strategy(
 ):
     """
     Run with a custom strategy.
-    
-    Usage:
-        from live.runner import run_with_strategy
-        from live.strategy import OptionStrategy, Signal, OptionQuote
-        
-        class MyStrategy(OptionStrategy):
-            def on_option_quote(self, quote: OptionQuote):
-                if quote.delta and abs(quote.delta) < 0.20:
-                    return self.create_signal(
-                        symbol=quote.symbol,
-                        action="SELL",
-                        quantity=1,
-                        limit_price=quote.bid,
-                        reason="Low delta put"
-                    )
-                return None
-        
-        run_with_strategy(
-            account_id="12345678",
-            strategy=MyStrategy("MyStrategy", ["SPY"]),
-            option_underlyings=["SPY"],
-            mode="monitor"  # Start with monitoring
-        )
     """
-    from clients.questrade_client import create_questrade_client
+    from clients.ibkr_adapter import create_ibkr_client
     from live.engine import create_engine
+    from config.defaults import ibkr_paper_port
     
-    client = create_questrade_client()
+    env_host = os.environ.get("IBKR_HOST")
+    env_port = os.environ.get("IBKR_PAPER_PORT")
+    port = int(env_port) if env_port else ibkr_paper_port()
+    client = create_ibkr_client(port=port, host=env_host)
     engine = create_engine(
-        questrade_client=client,
+        client=client,
         account_id=account_id,
         symbols=symbols,
         option_underlyings=option_underlyings,

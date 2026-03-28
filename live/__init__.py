@@ -1,7 +1,7 @@
 """
 Live Trading System Package
 
-Complete live trading system using Questrade API for real-time option data.
+Complete live trading system using IBKR TWS API (or Questrade) for real-time option data.
 Includes:
 - Trade database for storing all trades
 - Position manager for tracking positions
@@ -10,12 +10,12 @@ Includes:
 - Strategy base class
 
 Usage:
-    from clients.questrade_client import create_questrade_client
+    from clients.ibkr_adapter import create_ibkr_client
     from live import create_engine
     
-    client = create_questrade_client()
+    client = create_ibkr_client()
     engine = create_engine(
-        questrade_client=client,
+        client=client,
         account_id="YOUR_ACCOUNT_ID",
         option_underlyings=["SPY", "QQQ"],
         mode="monitor"  # "monitor", "paper", or "live"

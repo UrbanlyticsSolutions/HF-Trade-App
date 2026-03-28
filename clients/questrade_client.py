@@ -11,6 +11,8 @@ import json
 import time
 import logging
 import threading
+import re
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timedelta
@@ -91,7 +93,19 @@ class QuestradeClient:
             self.TOKEN_FILE = token_file
         
         # Try to load existing token first
-        loaded = self._load_token_from_file()
+        loaded = False
+        try:
+            loaded = self._load_token_from_file()
+        except ConnectionError:
+            # File token's refresh token is dead — surface a clear error.
+            # Don't fall back to the .env token because it was consumed on
+            # first use and is guaranteed to be invalid.
+            raise ConnectionError(
+                "Stored Questrade refresh token has expired (tokens last 7 days). "
+                "Generate a new token at Questrade App Hub -> API Access, "
+                "then update QUESTRADE_API_KEY in .env and delete "
+                f"{self.TOKEN_FILE} to force re-authentication."
+            )
         
         # Only authenticate with new refresh token if no valid stored token
         if not loaded:
@@ -110,6 +124,15 @@ class QuestradeClient:
     def _get_oauth_url(self) -> str:
         """Get appropriate OAuth URL based on mode"""
         return self.PRACTICE_OAUTH_URL if self._practice_mode else self.OAUTH_URL
+
+    @staticmethod
+    def _sanitize_error_message(message: str) -> str:
+        """Redact token-like values that may be present in HTTP error text."""
+        if not message:
+            return message
+        redacted = re.sub(r"(?i)(refresh_token=)[^&\s]+", r"\1<redacted>", message)
+        redacted = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1<redacted>", redacted)
+        return redacted
     
     def _authenticate(self, refresh_token: str) -> None:
         """
@@ -144,14 +167,15 @@ class QuestradeClient:
             logger.info(f"Successfully authenticated. Token expires in {expires_in} seconds.")
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Authentication failed: {e}")
-            if "400" in str(e):
+            safe_error = self._sanitize_error_message(str(e))
+            logger.error(f"Authentication failed: {safe_error}")
+            if "400" in safe_error:
                 logger.error("="*60)
                 logger.error("REFRESH TOKEN EXPIRED!")
                 logger.error("Go to Questrade App Hub -> API Access -> Generate New Token")
                 logger.error("Then update the .questrade_token.json file or pass new token")
                 logger.error("="*60)
-            raise ConnectionError(f"Failed to authenticate with Questrade: {e}")
+            raise ConnectionError(f"Failed to authenticate with Questrade: {safe_error}")
     
     def _robust_token_refresh(self, max_retries: int = 3) -> bool:
         """
@@ -172,65 +196,105 @@ class QuestradeClient:
         if self._refresh_in_progress:
             # Another thread is refreshing, wait and reload from file
             logger.debug("Token refresh already in progress, waiting...")
-            time.sleep(1)
-            return self._load_token_from_file()
+            time.sleep(2)
+            return self._reload_token_from_file_if_newer()
         
         with self._refresh_lock:
             # Double-check after acquiring lock
             if self._refresh_in_progress:
-                time.sleep(0.5)
-                return self._load_token_from_file()
+                time.sleep(1)
+                return self._reload_token_from_file_if_newer()
             
             self._refresh_in_progress = True
             
             try:
-                # Check if another thread already refreshed (file may be newer)
-                if self.TOKEN_FILE.exists():
-                    try:
-                        with open(self.TOKEN_FILE, "r") as f:
-                            data = json.load(f)
-                        file_token = data.get("refresh_token", "")
-                        current_token = self._token_info.refresh_token if self._token_info else ""
-                        
-                        # If file has different token, it was already refreshed
-                        if file_token and file_token != current_token:
-                            logger.info("Token already refreshed by another thread, loading from file")
-                            self._token_info = TokenInfo(
-                                access_token=data["access_token"],
-                                refresh_token=data["refresh_token"],
-                                api_server=data["api_server"],
-                                token_type=data.get("token_type", "Bearer"),
-                                expires_at=data["expires_at"]
-                            )
-                            return True
-                    except Exception as e:
-                        logger.debug(f"Could not check file token: {e}")
-                
-                # Perform refresh with retries
+                # --- Cross-process coordination ---
+                # Always re-read the file BEFORE attempting refresh.
+                # Another process may have already refreshed (consuming the old
+                # single-use token).  If the file's refresh_token differs from
+                # our in-memory copy, the file has a newer token — use it.
+                if self._reload_token_from_file_if_newer():
+                    return True
+
+                # --- File-lock protected refresh ---
+                # Use a lockfile so only one process refreshes at a time.
+                lock_path = str(self.TOKEN_FILE) + ".lock"
+                old_access = self._token_info.access_token if self._token_info else None
                 last_error = None
+
                 for attempt in range(max_retries):
+                    # Before every attempt, re-check file (another process may
+                    # have won the lock and refreshed while we were waiting).
+                    if attempt > 0 and self._reload_token_from_file_if_newer():
+                        return True
+
                     try:
-                        if self._token_info and self._token_info.refresh_token:
-                            self._authenticate(self._token_info.refresh_token)
-                            return True
-                        else:
-                            logger.error("No refresh token available")
-                            return False
+                        # Try to acquire file lock with timeout
+                        try:
+                            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                            os.close(fd)
+                        except FileExistsError:
+                            # Another process holds the lock — wait, then reload
+                            logger.debug("Another process is refreshing, waiting for lock...")
+                            for _ in range(10):  # wait up to 5s
+                                time.sleep(0.5)
+                                if not os.path.exists(lock_path):
+                                    break
+                            else:
+                                # Lock file stale (>5s), remove it
+                                try:
+                                    os.remove(lock_path)
+                                except OSError:
+                                    pass
+                            # After waiting, check if file token is now new
+                            if self._reload_token_from_file_if_newer():
+                                return True
+                            # Re-try to acquire lock
+                            try:
+                                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                                os.close(fd)
+                            except FileExistsError:
+                                # Still held — reload from file and give up this attempt
+                                time.sleep(1)
+                                if self._reload_token_from_file_if_newer():
+                                    return True
+                                continue
+
+                        try:
+                            if self._token_info and self._token_info.refresh_token:
+                                self._authenticate(self._token_info.refresh_token)
+                                return True
+                            else:
+                                logger.error("No refresh token available")
+                                return False
+                        finally:
+                            # Always release file lock
+                            try:
+                                os.remove(lock_path)
+                            except OSError:
+                                pass
+
                     except ConnectionError as e:
                         last_error = e
+                        # Release lock on failure
+                        try:
+                            os.remove(lock_path)
+                        except OSError:
+                            pass
+
                         if "400" in str(e):
-                            # Token is truly expired, no point retrying
+                            # 400 = consumed token.  Another process likely refreshed.
+                            # Re-read file one more time before giving up.
+                            time.sleep(0.5)
+                            if self._reload_token_from_file_if_newer():
+                                return True
                             logger.error("Refresh token expired, cannot recover automatically")
                             return False
                         
                         # Transient error, retry with backoff
-                        wait_time = (2 ** attempt) + (time.time() % 1)  # Exponential backoff with jitter
+                        wait_time = (2 ** attempt) + (time.time() % 1)
                         logger.warning(f"Token refresh attempt {attempt + 1} failed, retrying in {wait_time:.1f}s...")
                         time.sleep(wait_time)
-                        
-                        # Reload from file in case another process refreshed
-                        if self._load_token_from_file():
-                            return True
                 
                 if last_error:
                     logger.error(f"Token refresh failed after {max_retries} attempts: {last_error}")
@@ -238,9 +302,35 @@ class QuestradeClient:
                 
             finally:
                 self._refresh_in_progress = False
+
+    def _reload_token_from_file_if_newer(self) -> bool:
+        """Check if the token file was updated by another process and reload."""
+        if not self.TOKEN_FILE.exists():
+            return False
+        try:
+            with open(self.TOKEN_FILE, "r") as f:
+                data = json.load(f)
+            file_refresh = data.get("refresh_token", "")
+            current_refresh = self._token_info.refresh_token if self._token_info else ""
+            file_expires = data.get("expires_at", 0)
+            
+            # If the file has a different refresh token OR a later expiry, it's newer
+            if file_refresh and file_refresh != current_refresh and file_expires > time.time():
+                logger.info("Loading newer token from file (refreshed by another process)")
+                self._token_info = TokenInfo(
+                    access_token=data["access_token"],
+                    refresh_token=data["refresh_token"],
+                    api_server=data["api_server"],
+                    token_type=data.get("token_type", "Bearer"),
+                    expires_at=file_expires
+                )
+                return True
+        except Exception as e:
+            logger.debug(f"Could not check file token: {e}")
+        return False
     
     def _save_token_to_file(self) -> None:
-        """Save current token to file for persistence"""
+        """Save current token to file atomically for persistence"""
         if not self._token_info:
             return
         
@@ -254,8 +344,21 @@ class QuestradeClient:
                 "saved_at": datetime.now().isoformat()
             }
             
-            with open(self.TOKEN_FILE, "w") as f:
-                json.dump(token_data, f, indent=2)
+            # Atomic write: write to temp file then rename
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.TOKEN_FILE.parent), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(tmp_fd, "w") as f:
+                    json.dump(token_data, f, indent=2)
+                # Atomic rename (same filesystem)
+                os.replace(tmp_path, str(self.TOKEN_FILE))
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
             
             logger.debug(f"Token saved to {self.TOKEN_FILE}")
             
@@ -275,7 +378,11 @@ class QuestradeClient:
         try:
             with open(self.TOKEN_FILE, "r") as f:
                 data = json.load(f)
-            
+        except (json.JSONDecodeError, KeyError, OSError) as e:
+            logger.warning(f"Failed to read token file: {e}")
+            return False
+        
+        try:
             self._token_info = TokenInfo(
                 access_token=data["access_token"],
                 refresh_token=data["refresh_token"],
@@ -283,19 +390,30 @@ class QuestradeClient:
                 token_type=data.get("token_type", "Bearer"),
                 expires_at=data["expires_at"]
             )
-            
-            # Check if access token is expired
-            if time.time() >= self._token_info.expires_at:
-                logger.info("Stored access token expired, refreshing...")
-                self._authenticate(self._token_info.refresh_token)
-            else:
-                logger.info("Loaded valid token from file")
-            
-            return True
-            
-        except Exception as e:
-            logger.warning(f"Failed to load token from file: {e}")
+        except KeyError as e:
+            logger.warning(f"Token file missing required field: {e}")
             return False
+        
+        # Check if access token is still valid
+        if time.time() < self._token_info.expires_at:
+            logger.info("Loaded valid token from file")
+            return True
+        
+        # Access token expired — try refreshing with the file's refresh token
+        logger.info("Stored access token expired, refreshing with file refresh token...")
+        try:
+            self._authenticate(self._token_info.refresh_token)
+            return True
+        except ConnectionError as e:
+            # File refresh token is dead — let caller decide what to do.
+            # Do NOT fall through to __init__'s .env token since that original
+            # token was consumed on first use and is guaranteed invalid.
+            logger.error(
+                f"Token file refresh failed: {e}. "
+                f"The stored refresh token (saved {data.get('saved_at', 'unknown')}) "
+                f"has likely expired. Generate a new token at Questrade App Hub."
+            )
+            raise
     
     def _schedule_token_refresh(self) -> None:
         """Schedule automatic token refresh before expiry"""
@@ -334,16 +452,30 @@ class QuestradeClient:
                 logger.error("Auto-refresh failed")
     
     def _periodic_refresh_token(self) -> None:
-        """Periodically refresh token to keep it alive"""
+        """Periodically check for token updates from other processes.
+        
+        Instead of proactively authenticating (which consumes the single-use
+        refresh token and invalidates other processes' access tokens), just
+        reload from the shared token file.  If the file has a newer token
+        (refreshed by the engine or another process), adopt it.  Only
+        authenticate if the current token is near expiry and no one else
+        has refreshed yet.
+        """
         if self._token_info:
             logger.info("Periodic token refresh (keep-alive)...")
-            if self._robust_token_refresh():
-                # Reschedule periodic refresh
-                self._periodic_timer = threading.Timer(self.PERIODIC_REFRESH_SECONDS, self._periodic_refresh_token)
-                self._periodic_timer.daemon = True
-                self._periodic_timer.start()
-            else:
-                logger.error("Periodic refresh failed")
+            # First, try to pick up a newer token from file
+            reloaded = self._reload_token_from_file_if_newer()
+            if reloaded:
+                logger.info("Periodic refresh: loaded newer token from file")
+            elif time.time() >= self._token_info.expires_at - self.REFRESH_BUFFER_SECONDS:
+                # Token is actually near expiry — perform a real refresh
+                self._robust_token_refresh()
+            # else: token still valid, nothing to do
+
+            # Reschedule periodic refresh
+            self._periodic_timer = threading.Timer(self.PERIODIC_REFRESH_SECONDS, self._periodic_refresh_token)
+            self._periodic_timer.daemon = True
+            self._periodic_timer.start()
     
     def _ensure_valid_token(self) -> None:
         """Ensure we have a valid access token"""
@@ -371,7 +503,8 @@ class QuestradeClient:
         method: str, 
         endpoint: str, 
         params: Optional[Dict] = None,
-        data: Optional[Dict] = None
+        data: Optional[Dict] = None,
+        _retry_401: int = 0
     ) -> Any:
         """
         Make an API request to Questrade.
@@ -381,6 +514,7 @@ class QuestradeClient:
             endpoint: API endpoint path
             params: Query parameters
             data: Request body for POST/PUT
+            _retry_401: Internal counter to prevent infinite 401 retry loops
             
         Returns:
             JSON response data
@@ -405,14 +539,19 @@ class QuestradeClient:
                 retry_after = int(response.headers.get("Retry-After", 1))
                 logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
                 time.sleep(retry_after)
-                return self._request(method, endpoint, params, data)
+                return self._request(method, endpoint, params, data, _retry_401=_retry_401)
             
             # Handle 401 Unauthorized - token may have been revoked server-side
             if response.status_code == 401:
+                if _retry_401 >= 1:
+                    raise ConnectionError(
+                        "Persistent 401 after token refresh — refresh token is likely "
+                        "expired. Generate a new token at Questrade App Hub -> API Access."
+                    )
                 logger.warning("401 Unauthorized - attempting token refresh...")
                 if self._robust_token_refresh():
-                    # Retry the request with new token
-                    return self._request(method, endpoint, params, data)
+                    # Retry the request with new token (at most once)
+                    return self._request(method, endpoint, params, data, _retry_401=_retry_401 + 1)
                 else:
                     raise ConnectionError("Failed to refresh token after 401")
             
@@ -577,16 +716,18 @@ class QuestradeClient:
         account_id: str,
         symbol_id: int,
         quantity: int,
-        action: str,
-        order_type: str,
-        time_in_force: str,
+        action: str = None,
+        order_type: str = "Market",
+        time_in_force: str = "Day",
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
         is_all_or_none: bool = False,
         is_anonymous: bool = False,
         iceberg_quantity: Optional[int] = None,
         primary_route: str = "AUTO",
-        secondary_route: str = "AUTO"
+        secondary_route: str = "AUTO",
+        is_buy: Optional[bool] = None,
+        **kwargs,
     ) -> Dict:
         """
         Place a new order.
@@ -609,6 +750,12 @@ class QuestradeClient:
         Returns:
             Order response with orderId
         """
+        # Support is_buy (used by order_manager) in addition to action string
+        if action is None and is_buy is not None:
+            action = "Buy" if is_buy else "Sell"
+        elif action is None:
+            raise ValueError("Either 'action' or 'is_buy' must be provided")
+
         order_data = {
             "symbolId": symbol_id,
             "quantity": quantity,
@@ -1274,9 +1421,12 @@ class QuestradeClient:
         Returns:
             List of candle objects
         """
+        # Questrade requires ISO 8601 with Eastern timezone offset
+        # Strip microseconds — API rejects them
+        fmt = "%Y-%m-%dT%H:%M:%S-05:00"
         params = {
-            "startTime": start_time.isoformat(),
-            "endTime": end_time.isoformat(),
+            "startTime": start_time.replace(microsecond=0).strftime(fmt),
+            "endTime": end_time.replace(microsecond=0).strftime(fmt),
             "interval": interval
         }
         response = self._get(f"markets/candles/{symbol_id}", params)
@@ -1402,7 +1552,7 @@ class QuestradeClient:
 
 # Factory function with your token
 def create_questrade_client(
-    refresh_token: str = "_Njxa18IwotZr6FlaQ243aQIug8fb-yE0",
+    refresh_token: Optional[str] = None,
     practice_mode: bool = False,
     auto_refresh: bool = True
 ) -> QuestradeClient:
@@ -1410,22 +1560,27 @@ def create_questrade_client(
     Factory function to create Questrade client.
     
     Args:
-        refresh_token: Your Questrade API refresh token
+        refresh_token: Your Questrade API refresh token (falls back to
+                       QUESTRADE_API_KEY env var, then hardcoded default)
         practice_mode: Use practice/paper trading environment
         auto_refresh: Automatically refresh tokens before expiry
         
     Returns:
         Configured QuestradeClient instance
     """
+    if refresh_token is None:
+        refresh_token = os.environ.get("QUESTRADE_API_KEY", DEFAULT_REFRESH_TOKEN)
+    token_file_env = os.environ.get("QUESTRADE_TOKEN_FILE")
     return QuestradeClient(
         refresh_token=refresh_token,
+        token_file=Path(token_file_env) if token_file_env else None,
         practice_mode=practice_mode,
         auto_refresh=auto_refresh
     )
 
 
 # Default instance with your token
-DEFAULT_REFRESH_TOKEN = "_Njxa18IwotZr6FlaQ243aQIug8fb-yE0"
+DEFAULT_REFRESH_TOKEN = "pCGi0Pz5EU_50iMJRxGaQJ-nO_eqAKFa0"
 
 
 if __name__ == "__main__":

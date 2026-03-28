@@ -24,13 +24,14 @@ import threading
 SCRIPT_DIR = Path(__file__).parent
 
 
-def run_engine(mode: str = "paper", capital: float = 10000, verbose: bool = False):
+def run_engine(mode: str = "paper", capital: float = None, verbose: bool = False):
     """Run the trading engine in a subprocess."""
     cmd = [
         sys.executable, "-m", "live.runner_0dte",
         "--mode", mode,
-        "--capital", str(capital)
     ]
+    if capital is not None:
+        cmd.extend(["--capital", str(capital)])
     if verbose:
         cmd.append("-v")
     
@@ -47,7 +48,7 @@ def run_engine(mode: str = "paper", capital: float = 10000, verbose: bool = Fals
 
 def run_dashboard(port: int = 8050):
     """Run the Plotly dashboard in a subprocess."""
-    cmd = [sys.executable, "dashboard.py", "--port", str(port)]
+    cmd = [sys.executable, str(SCRIPT_DIR / "live" / "dashboard.py"), "--port", str(port)]
     
     print(f"[DASHBOARD] Starting dashboard on http://localhost:{port}...")
     return subprocess.Popen(
@@ -107,7 +108,9 @@ def stream_output(process, prefix: str):
                         'ENTRY', 'EXIT', 'Signal', 'ERROR', 'WARNING', 
                         'Successfully', 'Starting', 'Connecting', 'P&L',
                         'TRADING', 'Dash is running', 'http://', 'Got',
-                        'options for', 'token', 'Fetching'
+                        'options for', 'token', 'Fetching',
+                        'Order', 'order', 'placeOrder', 'resolve_contract',
+                        'conId', 'reqContract'
                     ]):
                         print(f"[{prefix}] {line}")
     except:
@@ -118,7 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description="0DTE Paper Trading Launcher")
     parser.add_argument("--mode", default="paper", choices=["monitor", "paper", "live"],
                        help="Trading mode (default: paper)")
-    parser.add_argument("--capital", type=float, default=10000, help="Starting capital")
+    parser.add_argument("--capital", type=float, default=None, help="Override capital (default: auto from broker)")
     parser.add_argument("--port", type=int, default=8050, help="Dashboard port")
     parser.add_argument("--dashboard-only", action="store_true", help="Run dashboard only")
     parser.add_argument("--engine-only", action="store_true", help="Run engine only")
@@ -131,7 +134,7 @@ def main():
     print("=" * 60)
     print(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Mode: {args.mode.upper()}")
-    print(f"  Capital: ${args.capital:,.0f}")
+    print(f"  Capital: {'$' + f'{args.capital:,.0f}' if args.capital else 'auto (from broker)'}")
     print(f"  Dashboard: http://localhost:{args.port}")
     print("=" * 60)
     print()
@@ -170,11 +173,8 @@ def main():
             t = threading.Thread(target=stream_output, args=(dash_proc, "DASHBOARD"), daemon=True)
             t.start()
             threads.append(t)
-            
-            # Open browser after short delay
-            time.sleep(2)
-            import webbrowser
-            webbrowser.open(f"http://localhost:{args.port}")
+            # Browser is opened once by dashboard.py main(); do not call webbrowser here
+            # or two tabs will open.
         
         print("\n[SYSTEM] All services started. Press Ctrl+C to stop.\n")
         
@@ -226,10 +226,22 @@ def main():
                         break
             
             # Check if any process died
-            for name, proc in processes:
+            for name, proc in list(processes):
                 if proc.poll() is not None:
                     print(f"\n[{name}] Process exited with code {proc.returncode}")
-                    raise KeyboardInterrupt
+                    if name == "ENGINE":
+                        write_to_output_file(f"[SYSTEM] Engine exited (code {proc.returncode}), restarting in 30s...")
+                        processes = [(n, p) for n, p in processes if n != "ENGINE"]
+                        time.sleep(30)
+                        print("[ENGINE] Auto-restarting...")
+                        write_to_output_file("[SYSTEM] Engine auto-restarting...")
+                        engine_proc = run_engine(args.mode, args.capital, args.verbose)
+                        processes.append(("ENGINE", engine_proc))
+                        t = threading.Thread(target=stream_output, args=(engine_proc, "ENGINE"), daemon=True)
+                        t.start()
+                        threads.append(t)
+                    else:
+                        raise KeyboardInterrupt
                     
     except KeyboardInterrupt:
         print("\n[SYSTEM] Shutting down...")

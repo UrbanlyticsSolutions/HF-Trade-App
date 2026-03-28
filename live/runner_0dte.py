@@ -12,9 +12,9 @@ Based on Phase 8 optimized results (Feb 2026):
 - Risk: SFL + CL=3 + DLL=0.8%
 
 Usage:
-    python -m live.runner_0dte --capital 10000
-    python -m live.runner_0dte --capital 10000 --mode paper
-    python -m live.runner_0dte --capital 10000 --mode live
+    python -m live.runner_0dte                          # auto-detects capital from broker
+    python -m live.runner_0dte --mode paper
+    python -m live.runner_0dte --capital 25000 --mode live  # override capital
 """
 import argparse
 import logging
@@ -23,9 +23,21 @@ import os
 import time
 from datetime import datetime, time as dt_time, timedelta
 import pytz
+from dotenv import load_dotenv
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Load .env from project root
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
+
+from config.defaults import (
+    initial_capital as _default_capital,
+    max_contracts as _default_max_contracts,
+    ibkr_live_port as _default_live_port,
+    ibkr_paper_port as _default_paper_port,
+    get_trade_config, get_risk_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +130,25 @@ def update_engine_status(status: str, extra_info: dict = None):
         logger.debug(f"Failed to update engine status: {e}")
 
 
-def wait_for_market_open():
+def _sync_engine_positions(engine):
+    """One-shot position sync from broker to DB for dashboard visibility."""
+    try:
+        engine.positions.sync_positions()
+        engine.positions.update_quotes()
+        if engine.db and hasattr(engine.db, 'update_current_positions'):
+            positions = engine.positions.get_all_positions()
+            engine.db.update_current_positions(positions)
+            logger.info(f"Position sync: {len(positions)} positions written to DB")
+    except Exception as e:
+        logger.warning(f"Position sync failed: {e}")
+
+
+def wait_for_market_open(engine=None):
     """Sleep until market is about to open, with periodic status updates."""
     update_engine_status("sleep", {"waiting_for": "market_open"})
+    
+    _last_sync = time.time()
+    _SYNC_INTERVAL = 300  # re-sync positions every 5 minutes during sleep
     
     while not is_trading_day() or get_eastern_time().time() < MARKET_OPEN:
         now_et = get_eastern_time()
@@ -149,6 +177,11 @@ def wait_for_market_open():
         # Sleep in chunks (max 5 minutes) to allow for interrupts and status updates
         sleep_duration = min(seconds_until, 300)  # 5 minute max sleep
         time.sleep(sleep_duration)
+        
+        # Periodic position sync during sleep so dashboard stays current
+        if engine and (time.time() - _last_sync) >= _SYNC_INTERVAL:
+            _sync_engine_positions(engine)
+            _last_sync = time.time()
     
     logger.info(f"Market is open! Time: {get_eastern_time().strftime('%H:%M:%S %Z')}")
     update_engine_status("starting", {"current_time_et": get_eastern_time().strftime('%H:%M:%S')})
@@ -156,7 +189,7 @@ def wait_for_market_open():
 
 def main():
     parser = argparse.ArgumentParser(description="Live 0DTE SPY Options Trading (Phase 8)")
-    parser.add_argument("--capital", type=float, default=10000, help="Account capital")
+    parser.add_argument("--capital", type=float, default=None, help="Account capital (default: from config)")
     parser.add_argument("--account", help="Questrade account ID (auto-detect if not provided)")
     parser.add_argument("--strategy", default=None, choices=["orb", "momentum", "mean_reversion"],
                         help="Strategy type (default: from strategy.json)")
@@ -164,10 +197,14 @@ def main():
                         help="Trading mode: monitor (no orders), paper (simulated), live (real)")
     parser.add_argument("--target", type=float, default=None, help="Profit target %% (default: from config)")
     parser.add_argument("--stop", type=float, default=None, help="Stop loss %% (default: from config)")
-    parser.add_argument("--max-contracts", type=int, default=50, help="Max contracts per trade")
+    parser.add_argument("--max-contracts", type=int, default=None, help="Max contracts per trade (default: from config)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     
     args = parser.parse_args()
+    
+    # Capital: CLI override > broker query > config fallback (resolved after broker connect)
+    capital = args.capital  # None means "fetch from broker"
+    max_contracts_val = args.max_contracts if args.max_contracts is not None else _default_max_contracts()
     
     mode = args.mode.upper()
     
@@ -180,13 +217,10 @@ def main():
     # Load strategy config from JSON file
     import json
     config_file = os.path.join(config_dir, 'strategy.json')
-    trade_config = {}
-    risk_config = {}
-    if os.path.exists(config_file):
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-            trade_config = config.get('trade_config', {})
-            risk_config = config.get('risk_config', {})
+    with open(config_file) as f:
+        full_config = json.load(f)
+    trade_config = get_trade_config()
+    risk_config = get_risk_config()
     
     # Ensure directories exist
     os.makedirs(logs_dir, exist_ok=True)
@@ -211,31 +245,85 @@ def main():
     print("LIVE 0DTE SPY OPTIONS TRADING (PHASE 8)")
     print("=" * 70)
     print(f"Mode: {mode}")
-    print(f"Capital: ${args.capital:,.2f}")
+    print(f"Broker: IBKR (orders/positions/quotes) + Questrade (option chains)")
+    print(f"Capital: {'$' + f'{capital:,.2f}' if capital else 'auto (from broker)'}")
     print(f"Strategy: {strategy_name.upper()}")
     print(f"Profit Target: {trade_config.get('profit_target_pct', 0.50):.0%}")
     print(f"Stop Loss: {trade_config.get('stop_loss_pct', 0.35):.0%}")
-    print(f"Max Contracts: {args.max_contracts}")
+    print(f"Max Contracts: {max_contracts_val}")
     print(f"Option Price Range: ${trade_config.get('min_option_price', 0.50):.2f} - ${trade_config.get('max_option_price', 2.00):.2f}")
-    print(f"Trading Window: {trade_config.get('trade_start_hour', 10)}:{trade_config.get('trade_start_minute', 0):02d} - {trade_config.get('trade_end_hour', 11)}:{trade_config.get('trade_end_minute', 0):02d} ET")
+    print(f"Trading Window: {trade_config.get('trade_start_hour', 9)}:{trade_config.get('trade_start_minute', 35):02d} - {trade_config.get('trade_end_hour', 15)}:{trade_config.get('trade_end_minute', 0):02d} ET")
     print(f"Max Hold: {trade_config.get('max_hold_minutes', 80)} min")
-    print(f"SFL: {risk_config.get('stop_after_first_loss', True)} | CL: {risk_config.get('max_consecutive_losses', 3)} | DLL: {risk_config.get('max_daily_loss_pct', 0.008):.1%}")
+    print(f"MDL: {risk_config.get('max_daily_losses', 2)} | CL: {risk_config.get('max_consecutive_losses', 3)} | DLL: {risk_config.get('max_daily_loss_pct', 0.008):.1%}")
     if mode == "LIVE":
         print(">>> WARNING: LIVE TRADING - REAL ORDERS WILL BE PLACED <<<")
     elif mode == "PAPER":
-        print(">>> PAPER TRADING - Simulated fills, no real orders <<<")
+        print(">>> PAPER TRADING - Real orders on IBKR paper account <<<")
     else:
         print(">>> MONITOR ONLY - No orders executed <<<")
     print("=" * 70)
     
     try:
-        from clients.questrade_client import create_questrade_client
         from live.engine import create_engine
         from live.strategy_0dte import create_0dte_strategy
         
-        # Connect to Questrade
-        logger.info("Connecting to Questrade...")
-        client = create_questrade_client()
+        # --- IBKR for orders/positions/quotes, Questrade ONLY for option chains ---
+        from clients.ibkr_adapter import create_ibkr_client
+        from clients.questrade_client import create_questrade_client
+        
+        qt_client = None
+        ibkr_client = None
+        
+        # 1) Connect IBKR (primary — orders, positions, account, quotes)
+        #    Retry with backoff in case gateway is still starting up (Docker)
+        logger.info("Connecting to IBKR (primary broker)...")
+        env_host = os.environ.get("IBKR_HOST")
+        env_port = os.environ.get("IBKR_LIVE_PORT") if mode.upper() == "LIVE" else os.environ.get("IBKR_PAPER_PORT")
+        ibkr_port = int(env_port) if env_port else (_default_live_port() if mode.upper() == "LIVE" else _default_paper_port())
+        # In Docker the gateway TCP port opens before the API layer is ready;
+        # wait a few seconds so IBC can finish its login dialogs.
+        if env_host:
+            logger.info("Docker detected — waiting 10s for gateway API layer...")
+            time.sleep(10)
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                ibkr_client = create_ibkr_client(port=ibkr_port, host=env_host)
+                ibkr_client.get_accounts()
+                logger.info("IBKR connected!")
+                break
+            except Exception as ie:
+                ibkr_client = None
+                if attempt < max_retries:
+                    delay = min(5 * attempt, 30)
+                    logger.warning(f"IBKR connection attempt {attempt}/{max_retries} failed: {ie} — retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"IBKR connection failed after {max_retries} attempts: {ie}")
+        
+        if not ibkr_client:
+            raise RuntimeError("IBKR could not connect. IBKR is required for orders/positions.")
+        
+        # 2) Try Questrade for option chain data only
+        logger.info("Connecting to Questrade (option chains only)...")
+        try:
+            qt_client = create_questrade_client()
+            qt_client.get_accounts()
+            logger.info("Questrade connected (option chains)!")
+        except Exception as qe:
+            logger.warning(f"Questrade connection failed: {qe} — will use IBKR for option chains too")
+            qt_client = None
+        
+        # IBKR is always the primary client for orders, positions, account, quotes
+        client = ibkr_client
+        quote_client = ibkr_client
+        # Questrade is ONLY used for option chain discovery (get_atm_options)
+        chains_client = qt_client or ibkr_client
+        
+        if qt_client:
+            logger.info("DUAL BROKER: IBKR (orders/positions/quotes) + Questrade (option chains)")
+        else:
+            logger.info("SINGLE BROKER: IBKR for everything (including option chains)")
         
         accounts = client.get_accounts()
         logger.info(f"Connected! Found {len(accounts)} accounts")
@@ -253,25 +341,46 @@ def main():
         
         logger.info(f"Using account: {account_id}")
         
+        # Resolve capital: CLI override > broker > config fallback
+        if capital is None:
+            try:
+                summary = ibkr_client.get_account_balances(account_id)
+                nlv = summary.get('NetLiquidation', {}).get('USD')
+                if nlv is None:
+                    nlv = summary.get('NetLiquidation', {}).get('CAD')
+                if nlv is not None:
+                    capital = float(nlv)
+                    logger.info(f"Account equity from IBKR: ${capital:,.2f}")
+                if capital is None:
+                    live_cfg = full_config.get('live', {})
+                    capital = live_cfg.get('fallback_capital', _default_capital())
+                    logger.warning(f"Could not read equity from broker, using fallback: ${capital:,.2f}")
+            except Exception as e:
+                live_cfg = full_config.get('live', {})
+                capital = live_cfg.get('fallback_capital', _default_capital())
+                logger.warning(f"Failed to fetch account equity: {e}, using fallback: ${capital:,.2f}")
+        
         # Create engine
         db_path = os.path.join(data_dir, 'live_0dte_trades.db')
         engine = create_engine(
-            questrade_client=client,
+            client=client,
             account_id=account_id,
             symbols=["SPY"],
             option_underlyings=["SPY"],
             mode=args.mode,
-            db_path=db_path
+            db_path=db_path,
+            quote_client=quote_client,
+            chains_client=chains_client
         )
         
-        # Create 0DTE strategy with Phase 8 config from strategy.json
+        # Create 0DTE strategy with all optimized params from strategy.json
         strategy = create_0dte_strategy(
-            account_capital=args.capital,
+            account_capital=capital,
             strategy=strategy_name,
             profit_target_pct=trade_config.get('profit_target_pct', 0.50),
             stop_loss_pct=trade_config.get('stop_loss_pct', 0.35),
-            max_contracts=args.max_contracts,
-            stop_after_first_loss=risk_config.get('stop_after_first_loss', True),
+            max_contracts=max_contracts_val,
+            max_daily_losses=risk_config.get('max_daily_losses', 2),
             max_consecutive_losses=risk_config.get('max_consecutive_losses', 3),
             max_daily_loss_pct=risk_config.get('max_daily_loss_pct', 0.008),
             min_option_price=trade_config.get('min_option_price', 0.50),
@@ -279,14 +388,28 @@ def main():
             orb_minutes=trade_config.get('orb_minutes', 30),
             orb_buffer_pct=trade_config.get('orb_buffer_pct', 0.10),
             max_hold_minutes=trade_config.get('max_hold_minutes', 80),
-            trade_start_hour=trade_config.get('trade_start_hour', 10),
-            trade_start_minute=trade_config.get('trade_start_minute', 0),
-            trade_end_hour=trade_config.get('trade_end_hour', 11),
+            trade_start_hour=trade_config.get('trade_start_hour', 9),
+            trade_start_minute=trade_config.get('trade_start_minute', 35),
+            trade_end_hour=trade_config.get('trade_end_hour', 15),
             trade_end_minute=trade_config.get('trade_end_minute', 0),
             exit_hour=trade_config.get('exit_hour', 15),
             rsi_call_threshold=trade_config.get('rsi_call_threshold', 70),
-            rsi_put_threshold=trade_config.get('rsi_put_threshold', 30),
-            questrade_client=client
+            rsi_put_threshold=trade_config.get('rsi_put_threshold', 35),
+            # Asymmetric CALL/PUT exits
+            call_profit_target_pct=trade_config.get('call_profit_target_pct'),
+            put_profit_target_pct=trade_config.get('put_profit_target_pct'),
+            call_stop_loss_pct=trade_config.get('call_stop_loss_pct'),
+            put_stop_loss_pct=trade_config.get('put_stop_loss_pct'),
+            # Regime detection
+            use_regime_detection=trade_config.get('use_regime_detection', False),
+            regime_lookback_days=trade_config.get('regime_lookback_days', 5),
+            regime_vol_percentile=trade_config.get('regime_vol_percentile', 0.30),
+            regime_trend_percentile=trade_config.get('regime_trend_percentile', 0.25),
+            regime_size_reduction=trade_config.get('regime_size_reduction', 0.50),
+            regime_skip_first_bar=trade_config.get('regime_skip_first_bar', True),
+            regime_rsi_buffer=trade_config.get('regime_rsi_buffer', 5),
+            regime_tighter_stop_pct=trade_config.get('regime_tighter_stop_pct'),
+            broker_client=ibkr_client
         )
         
         # Add strategy to engine
@@ -306,6 +429,23 @@ def main():
         
         engine.on_signal(on_signal)
         
+        # Sync historical trades from all sources before anything else
+        try:
+            from live.trade_sync import TradeSync
+            if hasattr(engine, 'db') and engine.db is not None:
+                syncer = TradeSync(engine.db)
+                sync_results = syncer.sync_all(ibkr_client=ibkr_client)
+                if any(v > 0 for v in sync_results.values()):
+                    # Reconcile state after importing trades
+                    if hasattr(strategy, 'persistence') and strategy.persistence:
+                        strategy.persistence.reconcile_with_db()
+                        logger.info("State reconciled after trade sync")
+        except Exception as e:
+            logger.warning(f"Trade sync at startup failed (non-fatal): {e}")
+
+        # Initial position sync to DB so dashboard shows positions even during sleep
+        _sync_engine_positions(engine)
+        
         # Check market hours and wait if outside trading window
         now_et = get_eastern_time()
         logger.info(f"Current time (ET): {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -318,8 +458,8 @@ def main():
             else:
                 logger.info(f"Market is closed. Closed at {MARKET_CLOSE.strftime('%H:%M')} ET.")
             
-            # Wait for market to open
-            wait_for_market_open()
+            # Wait for market to open (with periodic position syncs)
+            wait_for_market_open(engine=engine)
         
         # Print strategy status
         strategy.print_status()
@@ -329,7 +469,7 @@ def main():
         update_engine_status("live", {
             "mode": args.mode,
             "strategy": strategy_name,
-            "capital": args.capital,
+            "capital": capital,
             "started_at": get_eastern_time().strftime('%H:%M:%S')
         })
         engine.run()
@@ -337,51 +477,92 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         update_engine_status("stopped", {"reason": "user_interrupt"})
+    except (ConnectionError, RuntimeError) as e:
+        # Connection errors are retryable — don't sys.exit(1).
+        # Docker/start.py auto-restart will reconnect, but logging the error
+        # without exit(1) lets the process survive transient blips.
+        logger.error(f"Connection error (will be retried by supervisor): {e}", exc_info=True)
+        update_engine_status("error", {"error_message": str(e)[:100]})
+        # Exit with code 2 to distinguish from fatal errors.
+        # Docker restart: unless-stopped will restart on any non-zero exit.
+        sys.exit(2)
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Fatal error: {e}", exc_info=True)
         update_engine_status("error", {"error_message": str(e)[:100]})
         sys.exit(1)
 
 
-def quick_start(capital: float = 10000, strategy: str = "orb", mode: str = "monitor"):
+def quick_start(capital: float = None, strategy: str = "orb", mode: str = "monitor"):
     """
     Quick start function for Python usage.
     
     Usage:
         from live.runner_0dte import quick_start
-        quick_start(capital=10000, strategy="orb", mode="paper")
+        quick_start(strategy="orb", mode="paper")  # auto-detects capital from broker
     """
-    from clients.questrade_client import create_questrade_client
+    
     from live.engine import create_engine
     from live.strategy_0dte import create_0dte_strategy
+    from clients.ibkr_adapter import create_ibkr_client
+    from clients.questrade_client import create_questrade_client
     
     # Get project directory
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = os.path.join(project_dir, 'data')
     os.makedirs(data_dir, exist_ok=True)
     
-    # Connect
-    client = create_questrade_client()
+    # IBKR primary, Questrade only for option chains
+    qt_client = None
+    ibkr_client = None
+    
+    try:
+        env_host = os.environ.get("IBKR_HOST")
+        env_port = os.environ.get("IBKR_LIVE_PORT") if mode.upper() == "LIVE" else os.environ.get("IBKR_PAPER_PORT")
+        ibkr_port = int(env_port) if env_port else (_default_live_port() if mode.upper() == "LIVE" else _default_paper_port())
+        ibkr_client = create_ibkr_client(port=ibkr_port, host=env_host)
+        ibkr_client.get_accounts()
+    except Exception:
+        ibkr_client = None
+    
+    if not ibkr_client:
+        raise RuntimeError("IBKR could not connect. IBKR is required.")
+    
+    try:
+        qt_client = create_questrade_client()
+        qt_client.get_accounts()
+    except Exception:
+        qt_client = None
+    
+    client = ibkr_client
+    quote_client = ibkr_client
+    chains_client = qt_client or ibkr_client
+    
     accounts = client.get_accounts()
     account_id = str(accounts[0]['number'])
+    
+    # Resolve capital
+    if capital is None:
+        capital = _default_capital()
     
     # Create engine
     db_path = os.path.join(data_dir, 'live_0dte_trades.db')
     engine = create_engine(
-        questrade_client=client,
+        client=client,
         account_id=account_id,
         symbols=["SPY"],
         option_underlyings=["SPY"],
         mode=mode,
-        db_path=db_path
+        db_path=db_path,
+        quote_client=quote_client,
+        chains_client=chains_client
     )
     
     # Create and add strategy
-    strategy = create_0dte_strategy(account_capital=capital, strategy=strategy)
-    engine.add_strategy(strategy)
+    strategy_obj = create_0dte_strategy(account_capital=capital, strategy=strategy, broker_client=ibkr_client)
+    engine.add_strategy(strategy_obj)
     
     # Run
-    print(f"Running 0DTE {strategy} strategy with ${capital:,} capital")
+    print(f"Running 0DTE {strategy} strategy with ${capital:,} capital (IBKR)")
     print(f"Mode: {mode.upper()}")
     engine.run()
 

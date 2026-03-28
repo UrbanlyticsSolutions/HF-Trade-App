@@ -1,0 +1,11 @@
+import sqlite3
+c = sqlite3.connect("/app/data/live_0dte_trades.db")
+r = c.execute("SELECT count(*) FROM trades WHERE trade_type='stock'").fetchone()
+print(f"STK trades remaining: {r[0]}")
+r2 = c.execute("SELECT count(*) FROM trades").fetchone()
+print(f"Total trades: {r2[0]}")
+r3 = c.execute("SELECT count(*) FROM trades WHERE trade_type='option' OR option_type IN ('put','call')").fetchone()
+print(f"Option trades: {r3[0]}")
+r4 = c.execute("SELECT count(*) FROM trades WHERE status='open'").fetchone()
+print(f"Open positions: {r4[0]}")
+c.close()

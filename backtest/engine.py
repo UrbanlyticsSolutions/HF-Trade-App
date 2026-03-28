@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import sqlite3
 import sys
+
+from config import defaults as cfg
 sys.path.insert(0, '.')
 
 from core.signals import (
@@ -19,6 +21,7 @@ from core.signals import (
     DayFilterModel,
 )
 from core.risk_manager import RiskManager, RiskConfig
+from core.regime_classifier import classify_regimes, _compute_day_stats
 from clients.database import MarketDatabase
 
 
@@ -29,10 +32,10 @@ class TradeConfig:
     strategy: str = "momentum"
     
     # Entry timing
-    trade_start_hour: int = 10
-    trade_start_minute: int = 5      # Skip first 5 mins (10:00 has 44% WR vs 75%+ later)
-    trade_end_hour: int = 11
-    trade_end_minute: int = 30
+    trade_start_hour: int = 9
+    trade_start_minute: int = 35
+    trade_end_hour: int = 15
+    trade_end_minute: int = 0
     
     # RSI thresholds (for momentum and mean_reversion strategies)
     rsi_call_threshold: float = 70.0
@@ -63,17 +66,17 @@ class TradeConfig:
     use_adaptive_exits: bool = False   # Master switch for adaptive exits
     
     # Volatility-based PROFIT TARGETS
-    profit_low_vol: float = 0.20       # Profit target when VIX < 15
-    profit_mid_vol: float = 0.25       # Profit target when VIX 15-25
-    profit_high_vol: float = 0.35      # Profit target when VIX > 25
+    profit_low_vol: float = 0.15       # Profit target when VIX < 10 (calm - cash out quickly)
+    profit_mid_vol: float = 0.55       # Profit target when VIX 10-25 (normal)
+    profit_high_vol: float = 0.55      # Profit target when VIX > 25 (volatile)
     
     # Volatility-based STOP LOSSES
-    stop_low_vol: float = 0.18         # Stop loss when VIX < 15 (calm)
-    stop_mid_vol: float = 0.28         # Stop loss when VIX 15-25 (normal)
+    stop_low_vol: float = 0.20         # Stop loss when VIX < 10 (calm - tighter)
+    stop_mid_vol: float = 0.40         # Stop loss when VIX 10-25 (normal)
     stop_high_vol: float = 0.40        # Stop loss when VIX > 25 (volatile)
     
     # VIX thresholds
-    vix_low_threshold: float = 15.0    # VIX below this = low vol
+    vix_low_threshold: float = 10.0    # VIX below this = low vol
     vix_high_threshold: float = 25.0   # VIX above this = high vol
     
     # Entry price adjustment (cheap options need wider targets)
@@ -117,6 +120,236 @@ class TradeConfig:
     skip_day_filter: bool = True  # Skip all day filtering
     volatility_threshold: float = 0.80  # Percentile of historical vol
     volatility_lookback_days: int = 5
+
+    # ============================================================
+    # ASYMMETRIC CALL/PUT EXITS (None = use shared PT/SL)
+    # ============================================================
+    call_profit_target_pct: float = None
+    put_profit_target_pct: float = None
+    call_stop_loss_pct: float = None
+    put_stop_loss_pct: float = None
+    call_max_hold_bars: int = None
+    put_max_hold_bars: int = None
+    
+    # Minimum contracts to enter a trade (skip if position too small)
+    min_contracts_per_trade: int = 1
+    
+    # Maximum contracts per trade (cap tail risk from oversized positions)
+    max_contracts_per_trade: int = 0  # 0 = no cap
+    
+    # ============================================================
+    # POST-LOSS STRATEGY: what to do after first daily loss
+    # ============================================================
+    # Options:
+    #   "none"             - no change (original behaviour)
+    #   "flip"             - blind flip: invert every subsequent signal
+    #   "momentum_confirm" - flip only when 3-bar momentum confirms the reversal
+    #   "multi_confirm"    - re-derive direction from momentum+VWAP+trend consensus;
+    #                        skip trade if market is ambiguous/choppy
+    #   "adaptive"         - context-aware: adapts threshold based on loss exit reason,
+    #                        volatility regime, volume confirmation, and cooldown
+    post_loss_strategy: str = "none"
+    post_loss_momentum_threshold: float = 0.10  # min |momentum_3| to confirm flip (% change)
+    
+    # Adaptive post-loss parameters (used when post_loss_strategy == "adaptive")
+    post_loss_cooldown_bars: int = 2        # min bars to wait after loss before re-entering
+    post_loss_stop_factor: float = 0.5      # threshold multiplier for STOP losses (lower = easier flip)
+    post_loss_time_factor: float = 1.5      # threshold multiplier for TIME losses (harder to flip)
+    post_loss_min_vol_ratio: float = 0.8    # minimum volume ratio to confirm post-loss entry
+    
+    # ============================================================
+    # REGIME DETECTION: Multi-regime classifier
+    # ============================================================
+    # Detects 5 market regimes from prior-day technicals:
+    #   STEADY_UP  — Persistent uptrend + low vol (the May/Aug killer)
+    #   STEADY_DN  — Persistent downtrend + low vol
+    #   TRENDING   — Strong directional move with high momentum
+    #   CHOPPY     — Low vol, no direction, range-bound
+    #   VOLATILE   — High vol, big swings (good for momentum)
+    #   NORMAL     — None of the above (no adjustments)
+    #
+    use_regime_detection: bool = False      # Master switch
+    regime_lookback_days: int = 5           # Rolling window for regime features
+
+    # --- Classification thresholds (calibrate these) ---
+    regime_vol_percentile: float = 0.30     # Bottom N% of intraday vol = "low vol"
+    regime_trend_percentile: float = 0.25   # Bottom N% of trend strength = "no trend"
+    regime_up_day_pct: float = 0.70         # >= 70% up-days in window = steady uptrend
+    regime_dn_day_pct: float = 0.70         # >= 70% down-days in window = steady downtrend
+    regime_momentum_threshold: float = 0.012  # |return| over window > 1.2% = directional
+    regime_high_vol_percentile: float = 0.75  # Top 25% of intraday vol = "high vol"
+    regime_adx_trend_threshold: float = 25.0  # ADX-proxy above this = strong trend
+
+    # --- Per-regime adjustments: STEADY_UP ---
+    #   (Grinds higher daily, options decay before hitting PT)
+    steady_up_size_reduction: float = 0.30  # Cut size 30%
+    steady_up_call_pt_override: float = None  # Lower CALL PT (e.g. 0.30 vs 0.50)
+    steady_up_skip_puts: bool = True          # PUTs lose in steady uptrend
+    steady_up_rsi_buffer: int = 5             # Require stronger RSI for entry
+
+    # --- Per-regime adjustments: STEADY_DN ---
+    steady_dn_size_reduction: float = 0.30
+    steady_dn_put_pt_override: float = None   # Lower PUT PT
+    steady_dn_skip_calls: bool = True          # CALLs lose in steady downtrend
+    steady_dn_rsi_buffer: int = 5
+
+    # --- Per-regime adjustments: CHOPPY ---
+    #   (Low vol + no direction = theta decay eats premiums)
+    choppy_size_reduction: float = 0.50
+    choppy_skip_first_bar: bool = True
+    choppy_rsi_buffer: int = 5
+    choppy_tighter_stop_pct: float = None     # Override stop loss (None=no change)
+
+    # --- Per-regime adjustments: VOLATILE ---
+    #   (Big swings = good for momentum, but widen stops)
+    volatile_size_reduction: float = 0.0      # No size cut (vol is good)
+    volatile_stop_buffer_pct: float = 0.10    # Widen stop by 10% (let it breathe)
+    volatile_pt_buffer_pct: float = 0.10      # Widen PT by 10% (bigger moves)
+
+    # --- Per-regime adjustments: TRENDING ---
+    #   (Strong directional — ride the trend, skip counter-trend)
+    trending_skip_counter: bool = True        # Skip counter-trend entries
+    trending_hold_buffer: int = 4             # Add N bars to max hold (let it run)
+
+    # --- Backward-compat aliases (used if code references old fields) ---
+    regime_size_reduction: float = 0.50
+    regime_skip_first_bar: bool = True
+    regime_rsi_buffer: int = 5
+    regime_tighter_stop_pct: float = None
+    
+    # ============================================================
+    # DIRECTIONAL TREND FILTER: Skip counter-trend entries
+    # ============================================================
+    # Detects sustained multi-day uptrends/downtrends and skips
+    # counter-trend entries (PUTs in uptrend, CALLs in downtrend).
+    # Uses ONLY prior-day data — no look-ahead bias.
+    #
+    # August 2025 case study: SPY grinded up +3.71% with multiple
+    # consecutive up days. PUTs went 5/20 (25% WR), losing $7,045.
+    # This filter would have skipped most of those PUT entries.
+    #
+    use_trend_filter: bool = False
+    trend_lookback_days: int = 5            # Rolling window of trading days
+    trend_up_days_threshold: int = 4        # Skip PUTs if >= N of last lookback were up
+    trend_down_days_threshold: int = 4      # Skip CALLs if >= N of last lookback were down
+    trend_return_threshold: float = 0.015   # Also require |return| > 1.5% over window
+    trend_filter_action: str = 'skip'       # 'skip' = no trade, 'reduce' = cut size
+    trend_size_reduction: float = 0.50      # If action='reduce', cut position by 50%
+    
+    # ============================================================
+    # PUT ENTRY FILTERS: Skip low-quality PUT signals
+    # ============================================================
+    # Based on August 2025 analysis: very oversold PUTs bounce,
+    # Monday PUTs have 0% WR, and early entries (10:00-10:05) lose.
+    #
+    put_min_rsi: float = 25.0               # Skip PUTs with RSI < 25 (oversold bounces)
+    put_skip_days: list = None              # Skip PUTs on these weekdays [0=Mon] (None=disabled)
+    put_min_entry_minutes: int = 0          # Skip PUTs before this time (minutes since midnight, 610=10:10)
+    put_filter_require_uptrend: bool = True  # Only apply PUT filters when market is in uptrend
+    
+    # ============================================================
+    # ADAPTIVE PUT FILTER: Auto-throttle PUTs based on recent performance
+    # ============================================================
+    # Rather than detecting market regime with indicators (which fire too
+    # broadly in a bull market), this adapts to outcomes. If PUTs are
+    # consistently losing, the regime is unfavorable — stop taking PUTs.
+    #
+    # Backtest: +$10,636 full-year net gain vs baseline (not a cost).
+    # August 2025: reduced -$2,237 to -$134 (saved $2,102).
+    #
+    put_adaptive_filter: bool = True        # Master switch for adaptive PUT filter
+    put_loss_streak_threshold: int = 2      # Skip PUTs after N consecutive PUT losses
+    put_adaptive_cooldown: int = 3          # Skip next N PUT signals after streak hit
+    
+    # ============================================================
+    # ADAPTIVE CALL FILTER: Auto-throttle CALLs based on recent performance
+    # ============================================================
+    # Mirrors PUT adaptive filter. After N consecutive CALL losses,
+    # skip next M CALL signals. Analysis shows CALL WR drops to 46.4%
+    # after 3 consecutive losses, and CALLs are 64% of loss streaks.
+    #
+    call_adaptive_filter: bool = False       # Master switch for adaptive CALL filter
+    call_loss_streak_threshold: int = 2      # Skip CALLs after N consecutive CALL losses
+    call_adaptive_cooldown: int = 3          # Skip next N CALL signals after streak hit
+    
+    # ============================================================
+    # DIRECTION-AWARE LOSS ESCALATION: Cross-direction streak cooldown
+    # ============================================================
+    # Tracks ALL consecutive losses (regardless of direction). When a
+    # direction dominates the recent loss window, cooldown that direction.
+    # Addresses mixed-direction streaks (19/21 streaks are mixed CALL/PUT).
+    #
+    # Analysis: After 3 consecutive losses, CALL WR drops to 46.4% (PF 0.74)
+    # while PUT stays positive (66.7% WR). CALLs are 64% of loss streaks.
+    #
+    use_direction_loss_escalation: bool = False  # Master switch
+    direction_loss_window: int = 3               # Look at last N consecutive losses
+    direction_loss_threshold: int = 2            # Cooldown if >= N of window are same direction
+    direction_loss_cooldown: int = 3             # Skip next N signals of the losing direction
+    
+    # ============================================================
+    # POST-LOSS RSI TIGHTENING: Raise signal quality bar after streaks
+    # ============================================================
+    # When RiskManager enters reduced mode (after max_consecutive_losses),
+    # tighten RSI thresholds to filter out weak signals that extend streaks.
+    # Analysis: streak entries have RSI=71.6 vs normal 76.8 for CALLs.
+    #
+    consec_loss_rsi_buffer: int = 0  # Extra RSI buffer when in consecutive loss mode
+                                     # CALL: need RSI > threshold + buffer
+                                     # PUT:  need RSI < threshold - buffer
+    
+    # ============================================================
+    # SMART EXIT SYSTEM: Intelligent mid-trade assessment
+    # ============================================================
+    # Adds real-time market assessment during trades. Each feature can be
+    # independently enabled. The system is conservative by default: stall
+    # and reversal checks only fire when underwater to avoid cutting winners.
+    #
+    # Key design principle: Smart exits NEVER cascade into post-loss
+    # correction. They are tactical retreats, not market regime changes.
+    # This prevents the cascade problem where early smart exits change
+    # risk state and block subsequent (often winning) trades.
+    #
+    # Backtest notes (2025 in-sample, v3):
+    #   ProfitProtect alone:  +786% (98% of baseline, PF 2.34)
+    #   AdverseVelocity alone: +773% (96% of baseline, best risk-adjusted)
+    #   StallDetect alone:    +756% (94% of baseline, PF 2.39)
+    #   All combined:         +443% (55% of baseline, MaxDD 9.7%)
+    #   Trade-off: individual features retain 94-98% of upside; combining
+    #   all features still suffers from interaction/cascade effects.
+    #
+    use_smart_exit: bool = False            # Master switch (off by default)
+    
+    # 1. STALL DETECTION — 0DTE theta is decaying; if price isn't moving, exit early
+    #    Only fires when position is underwater (pct_change < 0) — let winners ride
+    smart_stall_bars: int = 5              # After N bars of no movement, signal stall
+    smart_stall_threshold: float = 0.03    # ±3% range = "stalled"
+    smart_stall_only_underwater: bool = True  # Only stall-exit if losing money
+    
+    # 2. UNDERLYING REVERSAL — exit if the signal that got us in has flipped
+    #    Only fires when position is underwater — profitable trades can ride the reversal
+    smart_underlying_reversal: bool = True  # Check if underlying RSI/momentum reversed
+    smart_rsi_reversal_band: float = 30.0  # RSI must move 30pts past midline (65->35 for CALL)
+    smart_reversal_only_underwater: bool = True  # Only exit on reversal if losing
+    
+    # 3. ADVERSE VELOCITY — big single-bar adverse move = early warning
+    smart_adverse_bar_pct: float = 0.25    # Single bar drops >25% of prev close = emergency exit
+    smart_adverse_only_underwater: bool = False  # Fire on all trades (25% crash is always serious)
+    
+    # 4. PROFIT PROTECTION RATCHET — once profitable, don't give it all back
+    smart_profit_protect_trigger: float = 0.30   # Activate after reaching +30% unrealized
+    smart_profit_protect_floor: float = 0.60     # Keep at least 60% of max unrealized profit
+    smart_profit_protect_min_bars: int = 2       # Require N consecutive bars below floor to confirm
+    smart_profit_protect_near_pt_pct: float = 0.50  # Skip protect if pct_change > PT * this (near profit target)
+    
+    # 5. MOMENTUM-BASED HOLD EXTENSION — don't force TIME exit if momentum is strong
+    smart_momentum_extend: bool = True     # Extend hold if momentum is in our favor
+    smart_momentum_extend_bars: int = 3    # Max extra bars to hold beyond max_hold
+    smart_momentum_extend_threshold: float = 0.08  # Require option rising >8% per bar to extend
+    
+    # 6. SMART EXIT CASCADE CONTROL
+    smart_exit_loss_threshold: float = 0.10   # Only arm post-loss correction if smart exit loss > this %
+    smart_reversal_min_bars: int = 3           # Min bars held before reversal can fire
     
     @classmethod
     def from_json(cls, json_path: str = "config/strategy.json") -> "TradeConfig":
@@ -166,8 +399,10 @@ class Backtest0DTE:
         self,
         trade_config: TradeConfig = None,
         risk_config: RiskConfig = None,
-        initial_capital: float = 10000
+        initial_capital: float = None
     ):
+        if initial_capital is None:
+            initial_capital = cfg.initial_capital()
         self.trade_config = trade_config or TradeConfig()
         self.risk_config = risk_config or RiskConfig()
         self.initial_capital = initial_capital
@@ -177,8 +412,12 @@ class Backtest0DTE:
         self.ml_model: Optional[TradingMLModel] = None
         self.day_filter: Optional[DayFilterModel] = None
         
+        # Pre-built indexes for fast lookups
+        self._opt_by_date_time: Dict = {}     # (date,time) -> DataFrame slice
+        self._opt_by_ticker_date: Dict = {}   # (ticker,date) -> DataFrame slice
+        
         # Data
-        self.db = MarketDatabase()
+        self.db = MarketDatabase("data/market_data.db")
         
     def load_data(
         self,
@@ -228,7 +467,130 @@ class Backtest0DTE:
         # Compute features (pass orb_minutes from config)
         features_df = compute_features(underlying_df, orb_minutes=self.trade_config.orb_minutes)
         
+        # Build indexes for fast lookups
+        self._build_option_index(options_df)
+        
         return underlying_df, options_df, features_df
+    
+    def _build_option_index(self, options_df: pd.DataFrame):
+        """Pre-index options data for O(1) lookups instead of O(n) scans."""
+        # Index by (date, time) for _find_option
+        self._opt_by_date_time = {}
+        for (date, time), group in options_df.groupby(['date', 'time']):
+            self._opt_by_date_time[(date, time)] = group
+        
+        # Index by (option_ticker, date) for _get_future_bars
+        self._opt_by_ticker_date = {}
+        for (ticker, date), group in options_df.groupby(['option_ticker', 'date']):
+            self._opt_by_ticker_date[(ticker, date)] = group.sort_values('time')
+        
+        print(f"  Indexes built: {len(self._opt_by_date_time):,} date-time slots, "
+              f"{len(self._opt_by_ticker_date):,} ticker-date combos")
+    
+    def compute_regime_features(self, underlying_df: pd.DataFrame) -> Dict[str, dict]:
+        """
+        Multi-regime classifier from underlying intraday data.
+        Delegates to shared core.regime_classifier for classification logic.
+        Uses ONLY past data (rolling window) — no look-ahead bias.
+
+        Returns:
+            Dict[date_str, dict] with keys:
+              regime_type, is_choppy, direction, intra_vol, trend_strength,
+              vol_pctl, trend_pctl, up_day_pct, window_return, adx_proxy
+        """
+        cfg_t = self.trade_config
+
+        # Build daily_bars list from DataFrame
+        daily_bars = []
+        for date, grp in underlying_df.groupby('date'):
+            prices = grp['close'].values.tolist()
+            daily_bars.append({'date': date, 'prices': prices})
+
+        # Sort chronologically
+        daily_bars.sort(key=lambda x: x['date'])
+
+        # Build config dict from TradeConfig
+        regime_config = {
+            'lookback': cfg_t.regime_lookback_days,
+            'vol_percentile': cfg_t.regime_vol_percentile,
+            'trend_percentile': cfg_t.regime_trend_percentile,
+            'up_day_pct': cfg_t.regime_up_day_pct,
+            'dn_day_pct': cfg_t.regime_dn_day_pct,
+            'momentum_threshold': cfg_t.regime_momentum_threshold,
+            'high_vol_percentile': cfg_t.regime_high_vol_percentile,
+            'adx_trend_threshold': cfg_t.regime_adx_trend_threshold,
+        }
+
+        return classify_regimes(daily_bars, regime_config)
+    
+    def compute_trend_filter(self, underlying_df: pd.DataFrame) -> Dict[str, dict]:
+        """
+        Compute per-day directional trend features for counter-trend filtering.
+        Uses ONLY prior-day data — no look-ahead bias.
+        
+        Detects sustained uptrends (unfavorable for PUTs) and downtrends
+        (unfavorable for CALLs) by counting up/down days and cumulative
+        return over a rolling lookback window.
+        
+        Returns:
+            Dict mapping date -> {
+                up_days: int, down_days: int, cum_return: float,
+                put_unfavorable: bool, call_unfavorable: bool
+            }
+        """
+        lookback = self.trade_config.trend_lookback_days
+        up_thr = self.trade_config.trend_up_days_threshold
+        down_thr = self.trade_config.trend_down_days_threshold
+        ret_thr = self.trade_config.trend_return_threshold
+        
+        # Build daily close series
+        daily_close = (
+            underlying_df.groupby('date')['close']
+            .last()
+            .sort_index()
+        )
+        
+        dates = daily_close.index.tolist()
+        closes = daily_close.values
+        
+        trend_data: Dict[str, dict] = {}
+        
+        for i, date in enumerate(dates):
+            if i < lookback:
+                trend_data[date] = {
+                    'up_days': 0, 'down_days': 0, 'cum_return': 0.0,
+                    'put_unfavorable': False, 'call_unfavorable': False,
+                }
+                continue
+            
+            # Use prior-day data only: window is [i-lookback, i-1]
+            # i.e., the lookback days BEFORE today
+            window_closes = closes[i - lookback:i]
+            
+            # Count up/down days (day-over-day changes within window)
+            up_days = 0
+            down_days = 0
+            for j in range(1, len(window_closes)):
+                if window_closes[j] > window_closes[j - 1]:
+                    up_days += 1
+                elif window_closes[j] < window_closes[j - 1]:
+                    down_days += 1
+            
+            # Cumulative return over the window
+            cum_return = (window_closes[-1] - window_closes[0]) / window_closes[0]
+            
+            put_unfavorable = up_days >= up_thr and cum_return > ret_thr
+            call_unfavorable = down_days >= down_thr and cum_return < -ret_thr
+            
+            trend_data[date] = {
+                'up_days': up_days,
+                'down_days': down_days,
+                'cum_return': cum_return,
+                'put_unfavorable': put_unfavorable,
+                'call_unfavorable': call_unfavorable,
+            }
+        
+        return trend_data
     
     def compute_historical_volatility(self, underlying_df: pd.DataFrame) -> Dict[str, float]:
         """
@@ -419,8 +781,11 @@ class Backtest0DTE:
         samples = []
         cfg = self.trade_config
         
-        # Get volatility values for percentile calc
-        all_vols = list(rolling_volatility.values())
+        # Get volatility values for percentile calc (handle both Series and dict)
+        if hasattr(rolling_volatility, 'values') and callable(getattr(rolling_volatility, 'values', None)):
+            all_vols = list(rolling_volatility.values())
+        else:
+            all_vols = list(rolling_volatility.dropna().values) if hasattr(rolling_volatility, 'dropna') else list(rolling_volatility)
         
         # Pre-group options
         options_by_date = {date: group for date, group in options_df.groupby('date')}
@@ -438,18 +803,20 @@ class Backtest0DTE:
             if current_hour < cfg.trade_start_hour or current_hour > cfg.trade_end_hour:
                 continue
             
-            # Use HISTORICAL volatility filter (no look-ahead)
-            if not self.is_volatile_enough(current_date, rolling_volatility, all_vols):
-                continue
+            # Skip volatility filter when day filter is disabled (skip_day_filter=True)
+            # so we get enough samples for Kelly calibration
+            if not cfg.skip_day_filter:
+                if not self.is_volatile_enough(current_date, rolling_volatility, all_vols):
+                    continue
             
             feat = features_df.iloc[idx]
             rsi = feat['rsi']
-            momentum_3 = feat['momentum_3']
+            momentum = feat.get('momentum', 0) if hasattr(feat, 'get') else feat['momentum']
             
             for direction in ['CALL', 'PUT']:
-                if direction == 'CALL' and momentum_3 < 0.1:
+                if direction == 'CALL' and momentum < 0.1:
                     continue
-                if direction == 'PUT' and momentum_3 > -0.1:
+                if direction == 'PUT' and momentum > -0.1:
                     continue
                 
                 option_type = 'call' if direction == 'CALL' else 'put'
@@ -475,29 +842,16 @@ class Backtest0DTE:
                     continue
                 
                 sample = {
-                    'date': current_date,  # Include date for day filter training
-                    # Top features (kept)
-                    'momentum_3': momentum_3,
-                    'trend_strength': feat['trend_strength'],
-                    'entry_price': entry_price,
-                    'volatility_short': feat['volatility_short'],
-                    'stoch_d': feat['stoch_d'],
-                    'bb_width': feat['bb_width'],
-                    'volatility': feat['volatility'],
-                    'dist_from_low': feat['dist_from_low'],
-                    'price_vs_sma20': feat['price_vs_sma20'],
-                    'stoch_k': feat['stoch_k'],
+                    'date': current_date,
                     'rsi': rsi,
-                    'cci': feat['cci'],
-                    'roc_5': feat['roc_5'],
-                    'dist_from_high': feat['dist_from_high'],
-                    'volume_ratio': feat['volume_ratio'],
+                    'momentum': momentum,
+                    'entry_price': entry_price,
+                    'bb_position': feat.get('bb_position', 0.5) if hasattr(feat, 'get') else feat['bb_position'],
+                    'vwap_dev_pct': feat.get('vwap_dev_pct', 0) if hasattr(feat, 'get') else feat['vwap_dev_pct'],
+                    'atr_pct': feat.get('atr_pct', 0) if hasattr(feat, 'get') else feat['atr_pct'],
+                    'vol_ratio': feat.get('vol_ratio', 1) if hasattr(feat, 'get') else feat['vol_ratio'],
                     'hour': current_hour,
-                    # NEW features
-                    'vwap_distance': feat.get('vwap_distance', 0),
-                    'atr_ratio': feat.get('atr_ratio', 1),
-                    'direction_put': 1 if direction == 'PUT' else 0,  # PUT has higher win rate
-                    # Output
+                    'direction_put': 1 if direction == 'PUT' else 0,
                     'win': outcome['win'],
                     'pnl_pct': outcome['pnl_pct'],
                 }
@@ -554,12 +908,12 @@ class Backtest0DTE:
                     continue
                 
                 feat = features.iloc[idx]
-                momentum_3 = feat['momentum_3']
+                momentum = feat.get('momentum', 0) if hasattr(feat, 'get') else feat['momentum']
                 
                 for direction in ['CALL', 'PUT']:
-                    if direction == 'CALL' and momentum_3 < 0.1:
+                    if direction == 'CALL' and momentum < 0.1:
                         continue
-                    if direction == 'PUT' and momentum_3 > -0.1:
+                    if direction == 'PUT' and momentum > -0.1:
                         continue
                     
                     option_type = 'call' if direction == 'CALL' else 'put'
@@ -885,17 +1239,21 @@ class Backtest0DTE:
         date: str,
         entry_time: str
     ) -> Optional[pd.Series]:
-        """Find best option contract (slightly ITM)"""
+        """Find best option contract (slightly ITM) using pre-built index."""
         cfg = self.trade_config
         
+        # Fast O(1) lookup instead of scanning full DataFrame
+        slot = self._opt_by_date_time.get((date, entry_time))
+        if slot is None or slot.empty:
+            return None
+        
+        # Filter by option type and price range
         mask = (
-            (options_df['date'] == date) &
-            (options_df['option_type'] == option_type) &
-            (options_df['close'] >= cfg.min_option_price) &
-            (options_df['close'] <= cfg.max_option_price) &
-            (options_df['time'] <= entry_time)
+            (slot['option_type'] == option_type) &
+            (slot['close'] >= cfg.min_option_price) &
+            (slot['close'] <= cfg.max_option_price)
         )
-        available = options_df[mask].copy()
+        available = slot[mask]
         
         if available.empty:
             return None
@@ -904,18 +1262,16 @@ class Backtest0DTE:
         if option_type == 'call':
             itm = available[available['strike'] < underlying_price]
             if not itm.empty:
-                itm = itm.copy()
-                itm['strike_diff'] = underlying_price - itm['strike']
-                return itm.loc[itm['strike_diff'].idxmin()]
+                strike_diff = underlying_price - itm['strike']
+                return itm.iloc[strike_diff.values.argmin()]
         else:
             itm = available[available['strike'] > underlying_price]
             if not itm.empty:
-                itm = itm.copy()
-                itm['strike_diff'] = itm['strike'] - underlying_price
-                return itm.loc[itm['strike_diff'].idxmin()]
+                strike_diff = itm['strike'] - underlying_price
+                return itm.iloc[strike_diff.values.argmin()]
         
-        available['strike_diff'] = abs(available['strike'] - underlying_price)
-        return available.loc[available['strike_diff'].idxmin()]
+        strike_diff = (available['strike'] - underlying_price).abs()
+        return available.iloc[strike_diff.values.argmin()]
     
     def _get_future_bars(
         self,
@@ -924,13 +1280,14 @@ class Backtest0DTE:
         date: str,
         entry_time: str
     ) -> pd.DataFrame:
-        """Get future bars for an option after entry"""
-        mask = (
-            (options_df['option_ticker'] == option_ticker) &
-            (options_df['date'] == date) &
-            (options_df['time'] > entry_time)
-        )
-        return options_df[mask].sort_values('time')
+        """Get future bars for an option after entry using pre-built index."""
+        # Fast O(1) lookup instead of scanning full DataFrame
+        ticker_day = self._opt_by_ticker_date.get((option_ticker, date))
+        if ticker_day is None or ticker_day.empty:
+            return pd.DataFrame()
+        
+        # Already sorted by time in index build
+        return ticker_day[ticker_day['time'] > entry_time]
     
     def _simulate_outcome(
         self,
@@ -1089,6 +1446,7 @@ class Backtest0DTE:
         """
         if len(training_data) < 10:
             print(f"  Warning: Only {len(training_data)} samples, using default Kelly")
+            self.risk_manager.set_kelly(0.08)
             return 0.08
         
         wins = training_data[training_data['win'] == 1]
@@ -1145,9 +1503,62 @@ class Backtest0DTE:
         
         # Track stats
         total_signals = 0
+        regime_skipped = 0
+        regime_reduced = 0
+        put_filtered = 0
+        
+        # Adaptive PUT filter state
+        _put_consec_losses: int = 0     # current consecutive PUT loss count
+        _put_cooldown_remaining: int = 0  # PUT signals left to skip in cooldown
+        put_adaptive_skipped = 0
+        
+        # Adaptive CALL filter state
+        _call_consec_losses: int = 0     # current consecutive CALL loss count
+        _call_cooldown_remaining: int = 0  # CALL signals left to skip in cooldown
+        call_adaptive_skipped = 0
+        
+        # Direction-aware loss escalation state
+        _recent_loss_dirs: list = []          # rolling list of directions for consecutive losses
+        _dir_cooldown_call: int = 0           # remaining CALL signals to skip
+        _dir_cooldown_put: int = 0            # remaining PUT signals to skip
+        dir_escalation_skipped = 0
+        
+        # Regime detection
+        _regime_data: Dict[str, dict] = {}
+        if cfg.use_regime_detection:
+            _regime_data = self.compute_regime_features(underlying_df)
+            # Count each regime type
+            _regime_counts: Dict[str, int] = {}
+            for v in _regime_data.values():
+                rt = v.get('regime_type', 'NORMAL')
+                _regime_counts[rt] = _regime_counts.get(rt, 0) + 1
+            choppy_days = sum(1 for v in _regime_data.values() if v.get('is_choppy', False))
+            if verbose:
+                parts = ', '.join(f'{k}={v}' for k, v in sorted(_regime_counts.items()))
+                print(f"\n  Regime Detection: {parts}  (choppy-equiv={choppy_days})")
+
+        # Directional trend filter (also needed for PUT filter gating)
+        _trend_data: Dict[str, dict] = {}
+        trend_skipped = 0
+        trend_reduced = 0
+        _need_trend = cfg.use_trend_filter or cfg.put_filter_require_uptrend
+        if _need_trend:
+            _trend_data = self.compute_trend_filter(underlying_df)
+            put_blocked = sum(1 for v in _trend_data.values() if v.get('put_unfavorable', False))
+            call_blocked = sum(1 for v in _trend_data.values() if v.get('call_unfavorable', False))
+            if verbose:
+                print(f"\n  Trend Data: {put_blocked} days PUT-unfavorable, {call_blocked} days CALL-unfavorable")
+
+        # Post-loss correction state
+        _post_loss_active: dict = {}    # date -> bool  (correction mode active)
+        _loss_direction: dict = {}      # date -> 'CALL'|'PUT'  (direction that lost)
+        _first_loss_seen: dict = {}
+        _loss_exit_reason: dict = {}    # date -> exit_reason ('STOP','TIME',etc.)
+        _loss_bar_idx: dict = {}        # date -> bar index when loss occurred
         
         # Compute VIX proxy from morning volatility (no look-ahead)
         vix_proxy = self.compute_morning_vol_for_vix(underlying_df)
+        _vix_median = float(np.median(list(vix_proxy.values()))) if vix_proxy else 15.0
         
         if verbose and cfg.use_adaptive_exits:
             vix_values = list(vix_proxy.values())
@@ -1159,6 +1570,15 @@ class Backtest0DTE:
                 print(f"    Low (<{cfg.vix_low_threshold}): {low_vol_days} days → 20%/18% exits")
                 print(f"    Mid ({cfg.vix_low_threshold}-{cfg.vix_high_threshold}): {mid_vol_days} days → 25%/28% exits")
                 print(f"    High (>{cfg.vix_high_threshold}): {high_vol_days} days → 35%/40% exits")
+        
+        # Smart exit: Build (date, time) -> features lookup for underlying assessment
+        _feat_by_dt: Dict[tuple, pd.Series] = {}
+        if cfg.use_smart_exit and cfg.smart_underlying_reversal:
+            for i in range(len(features_df)):
+                row_u = underlying_df.iloc[i]
+                _feat_by_dt[(row_u['date'], row_u['time'])] = features_df.iloc[i]
+            if verbose:
+                print(f"\n  Smart Exit: Built {len(_feat_by_dt):,} underlying feature lookups")
         
         total_rows = len(underlying_df)
         total_days = underlying_df['date'].nunique()
@@ -1180,7 +1600,10 @@ class Backtest0DTE:
             
             # Time filter
             hour = row['hour']
-            minute = row.get('minute', 0)
+            try:
+                minute = int(str(current_time).split(':')[1])
+            except (IndexError, ValueError):
+                minute = 0
             
             if hour < cfg.trade_start_hour:
                 continue
@@ -1194,12 +1617,67 @@ class Backtest0DTE:
             if not can_trade:
                 continue
             
+            # ============================================================
+            # REGIME DETECTION: Multi-regime adjustments
+            # ============================================================
+            _is_choppy = False
+            _regime_type = 'NORMAL'
+            _regime_direction = 0
+            _regime_skip_puts = False
+            _regime_skip_calls = False
+
+            if cfg.use_regime_detection and current_date in _regime_data:
+                _rd = _regime_data[current_date]
+                _is_choppy = _rd.get('is_choppy', False)
+                _regime_type = _rd.get('regime_type', 'NORMAL')
+                _regime_direction = _rd.get('direction', 0)
+
+                # --- CHOPPY: skip first bar ---
+                if _regime_type == 'CHOPPY' and cfg.choppy_skip_first_bar:
+                    if hour == cfg.trade_start_hour and minute <= cfg.trade_start_minute:
+                        regime_skipped += 1
+                        continue
+
+                # --- STEADY_UP: optionally skip PUTs entirely ---
+                if _regime_type == 'STEADY_UP' and cfg.steady_up_skip_puts:
+                    _regime_skip_puts = True
+
+                # --- STEADY_DN: optionally skip CALLs entirely ---
+                if _regime_type == 'STEADY_DN' and cfg.steady_dn_skip_calls:
+                    _regime_skip_calls = True
+
+                # --- TRENDING: skip counter-trend entries ---
+                if _regime_type == 'TRENDING' and cfg.trending_skip_counter:
+                    if _regime_direction > 0:
+                        _regime_skip_puts = True
+                    elif _regime_direction < 0:
+                        _regime_skip_calls = True
+            
             # Get signal from strategy
             feat = features_df.iloc[idx]
+            
+            # RSI buffer per regime
+            _call_thr = self.trade_config.rsi_call_threshold
+            _put_thr = self.trade_config.rsi_put_threshold
+            if _regime_type == 'CHOPPY' and cfg.choppy_rsi_buffer > 0:
+                _call_thr += cfg.choppy_rsi_buffer
+                _put_thr -= cfg.choppy_rsi_buffer
+            elif _regime_type == 'STEADY_UP' and cfg.steady_up_rsi_buffer > 0:
+                _call_thr += cfg.steady_up_rsi_buffer
+                _put_thr -= cfg.steady_up_rsi_buffer
+            elif _regime_type == 'STEADY_DN' and cfg.steady_dn_rsi_buffer > 0:
+                _call_thr += cfg.steady_dn_rsi_buffer
+                _put_thr -= cfg.steady_dn_rsi_buffer
+            
+            # Post-loss RSI tightening: raise bar when in consecutive loss mode
+            if cfg.consec_loss_rsi_buffer > 0 and self.risk_manager.in_reduced_mode:
+                _call_thr += cfg.consec_loss_rsi_buffer
+                _put_thr -= cfg.consec_loss_rsi_buffer
+            
             direction = get_basic_signal(
                 feat,
-                rsi_call_threshold=self.trade_config.rsi_call_threshold,
-                rsi_put_threshold=self.trade_config.rsi_put_threshold,
+                rsi_call_threshold=_call_thr,
+                rsi_put_threshold=_put_thr,
                 strategy=self.trade_config.strategy,
                 bb_buffer_pct=self.trade_config.bb_buffer_pct,
                 vwap_dev_threshold=self.trade_config.vwap_dev_threshold,
@@ -1207,7 +1685,184 @@ class Backtest0DTE:
             )
             if direction is None:
                 continue
+
+            # REGIME DIRECTIONAL FILTER: skip counter-regime entries
+            if direction == 'PUT' and _regime_skip_puts:
+                regime_skipped += 1
+                continue
+            if direction == 'CALL' and _regime_skip_calls:
+                regime_skipped += 1
+                continue
             
+            # POST-LOSS SIGNAL CORRECTION
+            _pls = cfg.post_loss_strategy
+            if _pls != 'none' and _post_loss_active.get(current_date, False):
+                lost_dir = _loss_direction.get(current_date)
+                flipped_dir = 'PUT' if direction == 'CALL' else 'CALL'
+
+                if _pls == 'flip':
+                    # Blind flip every signal after first loss
+                    direction = flipped_dir
+
+                elif _pls == 'momentum_confirm':
+                    # Flip only if 3-bar momentum confirms the reversal direction
+                    momentum = feat.get('momentum_3', 0) if hasattr(feat, 'get') else feat['momentum_3']
+                    _mthr = cfg.post_loss_momentum_threshold
+                    if lost_dir == 'CALL':
+                        # Market went DOWN vs our CALL — flip to PUT only if momentum negative
+                        if momentum < -_mthr:
+                            direction = 'PUT'
+                        else:
+                            continue  # market not confirming — skip
+                    else:  # lost_dir == 'PUT'
+                        # Market went UP vs our PUT — flip to CALL only if momentum positive
+                        if momentum > _mthr:
+                            direction = 'CALL'
+                        else:
+                            continue
+
+                elif _pls == 'multi_confirm':
+                    # Ignore original RSI signal; re-derive from multi-indicator consensus
+                    momentum = feat.get('momentum_3', 0) if hasattr(feat, 'get') else feat['momentum_3']
+                    vwap_d   = feat.get('vwap_distance', 0) if hasattr(feat, 'get') else feat.get('vwap_distance', 0)
+                    trend    = feat.get('trend_strength', 0) if hasattr(feat, 'get') else feat.get('trend_strength', 0)
+                    _mthr = cfg.post_loss_momentum_threshold
+
+                    bull = int(momentum > _mthr) + int(vwap_d > 0) + int(trend > 0)
+                    bear = int(momentum < -_mthr) + int(vwap_d < 0) + int(trend < 0)
+
+                    if bull >= 2:
+                        direction = 'CALL'
+                    elif bear >= 2:
+                        direction = 'PUT'
+                    else:
+                        continue  # ambiguous / choppy — skip trade
+
+                elif _pls == 'adaptive':
+                    # Context-aware post-loss: adapts threshold by exit reason, VIX, volume
+                    
+                    # 1. COOLDOWN: skip if too soon after loss
+                    loss_idx = _loss_bar_idx.get(current_date, 0)
+                    if idx - loss_idx < cfg.post_loss_cooldown_bars:
+                        continue
+                    
+                    # 2. VOLUME GATE: require sufficient volume participation
+                    vol_ratio = feat.get('vol_ratio', 1.0) if hasattr(feat, 'get') else feat.get('vol_ratio', 1.0)
+                    if vol_ratio < cfg.post_loss_min_vol_ratio:
+                        continue
+                    
+                    # 3. ADAPTIVE THRESHOLD based on exit reason + VIX
+                    _base_thr = cfg.post_loss_momentum_threshold
+                    loss_reason = _loss_exit_reason.get(current_date, 'STOP')
+                    
+                    # Exit-reason scaling: STOP = market moved hard → easier to flip
+                    #                      TIME = choppy → harder to flip
+                    if loss_reason == 'STOP':
+                        _mthr = _base_thr * cfg.post_loss_stop_factor
+                    elif loss_reason == 'TIME':
+                        _mthr = _base_thr * cfg.post_loss_time_factor
+                    else:
+                        _mthr = _base_thr  # TRAIL/BREAKEVEN — use base
+                    
+                    # VIX scaling: normalize by median VIX so threshold adapts to regime
+                    day_vix = vix_proxy.get(current_date, _vix_median)
+                    if _vix_median > 0:
+                        vix_scale = max(0.5, min(2.0, day_vix / _vix_median))
+                        _mthr *= vix_scale
+                    
+                    # 4. MOMENTUM CONFIRMATION (same logic as momentum_confirm but with adaptive threshold)
+                    momentum = feat.get('momentum_3', 0) if hasattr(feat, 'get') else feat['momentum_3']
+                    if lost_dir == 'CALL':
+                        if momentum < -_mthr:
+                            direction = 'PUT'
+                        else:
+                            continue
+                    else:  # lost_dir == 'PUT'
+                        if momentum > _mthr:
+                            direction = 'CALL'
+                        else:
+                            continue
+
+            # ============================================================
+            # ADAPTIVE PUT FILTER: Skip PUTs when recent PUT performance is poor
+            # ============================================================
+            if direction == 'PUT' and cfg.put_adaptive_filter:
+                if _put_cooldown_remaining > 0:
+                    _put_cooldown_remaining -= 1
+                    put_adaptive_skipped += 1
+                    continue
+            
+            # ============================================================
+            # ADAPTIVE CALL FILTER: Skip CALLs when recent CALL performance is poor
+            # ============================================================
+            if direction == 'CALL' and cfg.call_adaptive_filter:
+                if _call_cooldown_remaining > 0:
+                    _call_cooldown_remaining -= 1
+                    call_adaptive_skipped += 1
+                    continue
+            
+            # ============================================================
+            # DIRECTION-AWARE LOSS ESCALATION: Cooldown dominant losing direction
+            # ============================================================
+            if cfg.use_direction_loss_escalation:
+                if direction == 'CALL' and _dir_cooldown_call > 0:
+                    _dir_cooldown_call -= 1
+                    dir_escalation_skipped += 1
+                    continue
+                elif direction == 'PUT' and _dir_cooldown_put > 0:
+                    _dir_cooldown_put -= 1
+                    dir_escalation_skipped += 1
+                    continue
+            
+            # ============================================================
+            # PUT ENTRY FILTERS: Skip low-quality PUT signals
+            # Only active when market is in uptrend (put_filter_require_uptrend)
+            # or unconditionally if put_filter_require_uptrend=False
+            # ============================================================
+            if direction == 'PUT':
+                # Check if PUT filters should engage
+                _put_filter_active = True
+                if cfg.put_filter_require_uptrend:
+                    td = _trend_data.get(current_date, {})
+                    _put_filter_active = td.get('put_unfavorable', False)
+                
+                if _put_filter_active:
+                    # Skip PUTs with RSI below minimum (very oversold → bounce risk)
+                    if cfg.put_min_rsi > 0:
+                        rsi_val = feat.get('rsi', 50)
+                        if rsi_val < cfg.put_min_rsi:
+                            put_filtered += 1
+                            continue
+                    
+                    # Skip PUTs on specific weekdays (e.g. Monday=0)
+                    if cfg.put_skip_days:
+                        dow = pd.to_datetime(current_date).dayofweek
+                        if dow in cfg.put_skip_days:
+                            put_filtered += 1
+                            continue
+                    
+                    # Skip PUTs before minimum entry time
+                    if cfg.put_min_entry_minutes > 0:
+                        entry_minutes = hour * 60 + minute
+                        if entry_minutes < cfg.put_min_entry_minutes:
+                            put_filtered += 1
+                            continue
+            
+            # ============================================================
+            # DIRECTIONAL TREND FILTER: Skip counter-trend entries
+            # ============================================================
+            _trend_blocked = False
+            if cfg.use_trend_filter and current_date in _trend_data:
+                td = _trend_data[current_date]
+                if direction == 'PUT' and td.get('put_unfavorable', False):
+                    _trend_blocked = True
+                elif direction == 'CALL' and td.get('call_unfavorable', False):
+                    _trend_blocked = True
+                
+                if _trend_blocked and cfg.trend_filter_action == 'skip':
+                    trend_skipped += 1
+                    continue
+
             total_signals += 1
             option_type = 'call' if direction == 'CALL' else 'put'
             
@@ -1237,6 +1892,35 @@ class Backtest0DTE:
                 current_date, hour, entry_price, vix_proxy
             )
             
+            # Direction-specific overrides (skip when adaptive exits override)
+            if not cfg.use_adaptive_exits:
+                if direction == 'CALL' and cfg.call_profit_target_pct is not None:
+                    profit_target = cfg.call_profit_target_pct
+                elif direction == 'PUT' and cfg.put_profit_target_pct is not None:
+                    profit_target = cfg.put_profit_target_pct
+                if direction == 'CALL' and cfg.call_stop_loss_pct is not None:
+                    stop_loss = cfg.call_stop_loss_pct
+                elif direction == 'PUT' and cfg.put_stop_loss_pct is not None:
+                    stop_loss = cfg.put_stop_loss_pct
+            
+            # ============================================================
+            # REGIME ADJUSTMENTS: Per-regime PT/SL/hold overrides
+            # ============================================================
+            if _regime_type == 'CHOPPY' and cfg.choppy_tighter_stop_pct is not None:
+                stop_loss = cfg.choppy_tighter_stop_pct
+
+            if _regime_type == 'STEADY_UP':
+                if direction == 'CALL' and cfg.steady_up_call_pt_override is not None:
+                    profit_target = cfg.steady_up_call_pt_override
+
+            if _regime_type == 'STEADY_DN':
+                if direction == 'PUT' and cfg.steady_dn_put_pt_override is not None:
+                    profit_target = cfg.steady_dn_put_pt_override
+
+            if _regime_type == 'VOLATILE':
+                stop_loss = stop_loss + cfg.volatile_stop_buffer_pct
+                profit_target = profit_target + cfg.volatile_pt_buffer_pct
+            
             # Position sizing (PASS STOP LOSS for proper risk calculation)
             num_contracts, _ = self.risk_manager.get_position_size(
                 entry_price, 
@@ -1244,12 +1928,46 @@ class Backtest0DTE:
                 stop_loss_pct=stop_loss
             )
             
-            # Skip if position too small
+            # ============================================================
+            # REGIME ADJUSTMENT: Per-regime position size reduction
+            # ============================================================
+            _regime_size_red = 0.0
+            if _regime_type == 'CHOPPY':
+                _regime_size_red = cfg.choppy_size_reduction
+            elif _regime_type == 'STEADY_UP':
+                _regime_size_red = cfg.steady_up_size_reduction
+            elif _regime_type == 'STEADY_DN':
+                _regime_size_red = cfg.steady_dn_size_reduction
+            elif _regime_type == 'VOLATILE':
+                _regime_size_red = cfg.volatile_size_reduction
+
+            if _regime_size_red > 0:
+                reduced = max(1, int(num_contracts * (1 - _regime_size_red)))
+                if reduced < num_contracts:
+                    regime_reduced += 1
+                num_contracts = reduced
+            
+            # ============================================================
+            # TREND FILTER: Reduce position size for counter-trend entries
+            # ============================================================
+            if _trend_blocked and cfg.trend_filter_action == 'reduce':
+                reduced = max(1, int(num_contracts * (1 - cfg.trend_size_reduction)))
+                if reduced < num_contracts:
+                    trend_reduced += 1
+                num_contracts = reduced
+            
+            # Cap max contracts per trade
+            if cfg.max_contracts_per_trade > 0:
+                num_contracts = min(num_contracts, cfg.max_contracts_per_trade)
+            
+            # Skip if position too small or below minimum
             if num_contracts == 0:
+                continue
+            if num_contracts < cfg.min_contracts_per_trade:
                 continue
             
             # ============================================================
-            # SIMULATE EXIT with ADAPTIVE TARGETS + TRAILING STOP
+            # SIMULATE EXIT with ADAPTIVE TARGETS + TRAILING STOP + SMART EXIT
             # ============================================================
             exit_price = None
             exit_reason = None
@@ -1260,11 +1978,19 @@ class Backtest0DTE:
             trailing_stop_price = None
             breakeven_activated = False
             
+            # Smart exit tracking
+            _opt_prices = []           # option price history for momentum/stall
+            _smart_profit_floor = None # profit protection ratchet floor
+            _protect_below_count = 0   # consecutive bars below profit floor
+            
             for bar_idx, (_, bar) in enumerate(future_bars.iterrows()):
                 bars_held = bar_idx + 1
                 bar_price = bar['close']
                 
                 pct_change = (bar_price - entry_price) / entry_price
+                
+                # Track option price history for smart exit
+                _opt_prices.append(bar_price)
                 
                 # Update max profit for trailing stop
                 if pct_change > max_profit_pct:
@@ -1321,17 +2047,108 @@ class Backtest0DTE:
                     exit_reason = 'BREAKEVEN' if not cfg.use_trailing_stop else 'TRAIL'
                     break
                 
+                # ============================================================
+                # SMART EXIT ASSESSMENT (intelligent mid-trade evaluation)
+                # ============================================================
+                if cfg.use_smart_exit:
+                    _smart_exit = False
+                    
+                    # 2a. ADVERSE VELOCITY — single bar drops too hard
+                    #     Skip if position is profitable (winning trades tolerate dips)
+                    if len(_opt_prices) >= 2:
+                        _adverse_allowed = (not cfg.smart_adverse_only_underwater) or (pct_change < 0)
+                        if _adverse_allowed:
+                            bar_return = (_opt_prices[-1] - _opt_prices[-2]) / _opt_prices[-2]
+                            if bar_return < -cfg.smart_adverse_bar_pct:
+                                exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
+                                exit_reason = 'SMART_ADVERSE'
+                                _smart_exit = True
+                    
+                    # 2b. PROFIT PROTECTION RATCHET — once profitable, lock in a floor
+                    #     Skip if price is near the profit target (let it ride to PT)
+                    if not _smart_exit and max_profit_pct >= cfg.smart_profit_protect_trigger:
+                        _near_pt = pct_change >= (profit_target * cfg.smart_profit_protect_near_pt_pct)
+                        if not _near_pt:
+                            _smart_profit_floor = max_profit_pct * cfg.smart_profit_protect_floor
+                            if pct_change < _smart_profit_floor:
+                                _protect_below_count += 1
+                                if _protect_below_count >= cfg.smart_profit_protect_min_bars:
+                                    exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
+                                    exit_reason = 'SMART_PROTECT'
+                                    _smart_exit = True
+                            else:
+                                _protect_below_count = 0  # reset if recovered above floor
+                    
+                    # 2c. STALL DETECTION — theta is eating the position if no movement
+                    #     Only fire if underwater (or flag disabled) — don't cut profitable stalls
+                    if not _smart_exit and bars_held >= cfg.smart_stall_bars:
+                        _stall_allowed = (not cfg.smart_stall_only_underwater) or (pct_change < 0)
+                        if _stall_allowed:
+                            recent_prices = _opt_prices[-cfg.smart_stall_bars:]
+                            range_pct = (max(recent_prices) - min(recent_prices)) / recent_prices[-1]
+                            if range_pct < cfg.smart_stall_threshold:
+                                exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
+                                exit_reason = 'SMART_STALL'
+                                _smart_exit = True
+                    
+                    # 2d. UNDERLYING REVERSAL — the signal thesis has broken
+                    #     Only fire if underwater (or flag disabled) — profitable reversals are fine
+                    #     Require minimum bars held to avoid reacting to entry-bar noise
+                    if not _smart_exit and cfg.smart_underlying_reversal and bars_held >= cfg.smart_reversal_min_bars:
+                        _reversal_allowed = (not cfg.smart_reversal_only_underwater) or (pct_change < 0)
+                        if _reversal_allowed:
+                            bar_time = bar.get('time', '') if hasattr(bar, 'get') else bar['time'] if 'time' in bar.index else ''
+                            bar_date = bar.get('date', current_date) if hasattr(bar, 'get') else bar['date'] if 'date' in bar.index else current_date
+                            uf = _feat_by_dt.get((bar_date, bar_time))
+                            if uf is not None:
+                                current_rsi = uf.get('rsi', 50) if hasattr(uf, 'get') else uf['rsi']
+                                # Use actual signal thresholds with extra buffer:
+                                # CALL thesis breaks when RSI drops BELOW put_threshold - 5
+                                # PUT thesis breaks when RSI rises ABOVE call_threshold + 5
+                                # This ensures genuine reversal, not just noise around midline
+                                if direction == 'CALL' and current_rsi < (cfg.rsi_put_threshold - 5):
+                                    exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
+                                    exit_reason = 'SMART_REVERSAL'
+                                    _smart_exit = True
+                                elif direction == 'PUT' and current_rsi > (cfg.rsi_call_threshold + 5):
+                                    exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
+                                    exit_reason = 'SMART_REVERSAL'
+                                    _smart_exit = True
+                    
+                    if _smart_exit:
+                        break
+                
                 # 3. STOP LOSS (with quick-exit tightening)
                 if pct_change <= -current_stop_loss:
                     exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
                     exit_reason = 'STOP'
                     break
                 
-                # 4. TIME EXIT
-                if bars_held >= cfg.max_hold_bars:
-                    exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
-                    exit_reason = 'TIME'
-                    break
+                # 4. TIME EXIT (direction-specific hold bars) with SMART HOLD EXTENSION
+                _hold_limit = cfg.max_hold_bars
+                if direction == 'CALL' and cfg.call_max_hold_bars is not None:
+                    _hold_limit = cfg.call_max_hold_bars
+                elif direction == 'PUT' and cfg.put_max_hold_bars is not None:
+                    _hold_limit = cfg.put_max_hold_bars
+
+                # REGIME: extend hold in TRENDING regime (let winners run)
+                if _regime_type == 'TRENDING' and cfg.trending_hold_buffer > 0:
+                    _hold_limit += cfg.trending_hold_buffer
+                
+                if bars_held >= _hold_limit:
+                    # SMART MOMENTUM EXTENSION: if option is surging, hold a bit longer
+                    _force_time_exit = True
+                    if cfg.use_smart_exit and cfg.smart_momentum_extend and pct_change > 0:
+                        extra_allowed = _hold_limit + cfg.smart_momentum_extend_bars
+                        if bars_held < extra_allowed and len(_opt_prices) >= 2:
+                            recent_momentum = (_opt_prices[-1] - _opt_prices[-2]) / _opt_prices[-2]
+                            if recent_momentum >= cfg.smart_momentum_extend_threshold:
+                                _force_time_exit = False  # still surging — hold
+                    
+                    if _force_time_exit:
+                        exit_price = self.risk_manager.apply_slippage(bar_price, is_entry=False)
+                        exit_reason = 'TIME'
+                        break
             
             if exit_price is None:
                 continue
@@ -1343,14 +2160,28 @@ class Backtest0DTE:
             
             # Record trade
             self.risk_manager.record_trade(current_date, net_pnl)
+
+            # Post-loss correction: arm after first loss this day
+            # Smart exits NEVER cascade into post-loss — they are tactical retreats,
+            # not evidence of a market regime change that warrants strategy correction
+            if cfg.post_loss_strategy != 'none':
+                _is_smart_exit = exit_reason.startswith('SMART_') if exit_reason else False
+                
+                if net_pnl < 0 and not _first_loss_seen.get(current_date, False) and not _is_smart_exit:
+                    _first_loss_seen[current_date] = True
+                    _post_loss_active[current_date] = True
+                    _loss_direction[current_date] = direction  # record which direction lost
+                    _loss_exit_reason[current_date] = exit_reason  # STOP, TIME, TRAIL, etc.
+                    _loss_bar_idx[current_date] = idx  # bar index for cooldown
             
             rsi = feat['rsi']
             kelly_pct = self.risk_manager.position_sizer.kelly_pct
             
             if verbose:
                 emoji = "+" if net_pnl > 0 else "x"
+                pl_tag = f"[{cfg.post_loss_strategy.upper()}]" if _post_loss_active.get(current_date, False) else ""
                 print(f"  {emoji} {current_date} {current_time} | K={kelly_pct:.0%} | "
-                      f"RSI={rsi:.0f} | {direction} {strike:.0f} | {exit_reason} | ${net_pnl:+.2f}")
+                      f"RSI={rsi:.0f} | {direction} {strike:.0f} | {exit_reason} | ${net_pnl:+.2f}{pl_tag}")
             
             trades.append(Trade0DTE(
                 date=current_date,
@@ -1369,10 +2200,60 @@ class Backtest0DTE:
                 pnl=net_pnl,
                 capital=self.risk_manager.capital
             ))
+            
+            # Update adaptive PUT filter state after trade completes
+            if direction == 'PUT' and cfg.put_adaptive_filter:
+                if net_pnl > 0:
+                    _put_consec_losses = 0
+                else:
+                    _put_consec_losses += 1
+                    if _put_consec_losses >= cfg.put_loss_streak_threshold:
+                        _put_cooldown_remaining = cfg.put_adaptive_cooldown
+                        _put_consec_losses = 0
+            
+            # Update adaptive CALL filter state after trade completes
+            if direction == 'CALL' and cfg.call_adaptive_filter:
+                if net_pnl > 0:
+                    _call_consec_losses = 0
+                else:
+                    _call_consec_losses += 1
+                    if _call_consec_losses >= cfg.call_loss_streak_threshold:
+                        _call_cooldown_remaining = cfg.call_adaptive_cooldown
+                        _call_consec_losses = 0
+            
+            # Update direction-aware loss escalation state
+            if cfg.use_direction_loss_escalation:
+                if net_pnl < 0:
+                    _recent_loss_dirs.append(direction)
+                    # Check if window is full and a direction dominates
+                    if len(_recent_loss_dirs) >= cfg.direction_loss_window:
+                        window = _recent_loss_dirs[-cfg.direction_loss_window:]
+                        call_count = window.count('CALL')
+                        put_count = window.count('PUT')
+                        if call_count >= cfg.direction_loss_threshold:
+                            _dir_cooldown_call = cfg.direction_loss_cooldown
+                        if put_count >= cfg.direction_loss_threshold:
+                            _dir_cooldown_put = cfg.direction_loss_cooldown
+                else:
+                    # Win breaks the consecutive loss streak
+                    _recent_loss_dirs.clear()
         
         if verbose:
             print()  # Clear progress line
         print(f"\nTotal signals: {total_signals}")
         print(f"Trades executed: {len(trades)}")
+        if cfg.use_regime_detection:
+            print(f"Regime: {regime_skipped} signals skipped, {regime_reduced} trades size-reduced")
+        if cfg.use_trend_filter:
+            print(f"Trend Filter: {trend_skipped} signals skipped, {trend_reduced} trades size-reduced")
+        if put_filtered > 0:
+            mode = 'uptrend-only' if cfg.put_filter_require_uptrend else 'always'
+            print(f"PUT Filter ({mode}): {put_filtered} PUT signals skipped (min_rsi={cfg.put_min_rsi}, skip_days={cfg.put_skip_days}, min_entry_min={cfg.put_min_entry_minutes})")
+        if put_adaptive_skipped > 0:
+            print(f"PUT Adaptive: {put_adaptive_skipped} PUT signals skipped (streak>={cfg.put_loss_streak_threshold}, cooldown={cfg.put_adaptive_cooldown})")
+        if call_adaptive_skipped > 0:
+            print(f"CALL Adaptive: {call_adaptive_skipped} CALL signals skipped (streak>={cfg.call_loss_streak_threshold}, cooldown={cfg.call_adaptive_cooldown})")
+        if dir_escalation_skipped > 0:
+            print(f"Direction Escalation: {dir_escalation_skipped} signals skipped (window={cfg.direction_loss_window}, threshold={cfg.direction_loss_threshold}, cooldown={cfg.direction_loss_cooldown})")
         
         return trades

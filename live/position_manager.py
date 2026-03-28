@@ -2,7 +2,7 @@
 Position Manager - Track and manage live positions
 
 Handles:
-- Position tracking from Questrade
+- Position tracking from broker (IBKR or Questrade)
 - Position sizing
 - Risk management per position
 - P&L calculation in real-time
@@ -50,15 +50,18 @@ class PositionManager:
     Manages positions and provides real-time tracking.
     """
     
-    def __init__(self, questrade_client, trade_db=None):
+    def __init__(self, broker_client, trade_db=None, quote_client=None):
         """
         Initialize position manager.
         
         Args:
-            questrade_client: QuestradeClient instance
+            broker_client: Broker client for order/position operations (IBKRAdapter or QuestradeClient)
             trade_db: Optional TradeDatabase for persistence
+            quote_client: Separate client for real-time market data (e.g. Questrade).
+                          If None, uses the main client for both.
         """
-        self.client = questrade_client
+        self.client = broker_client
+        self.quote_client = quote_client or broker_client
         self.db = trade_db
         self._positions: Dict[str, Position] = {}  # symbol -> Position
         self._account_id: Optional[str] = None
@@ -85,7 +88,10 @@ class PositionManager:
         try:
             positions_data = self.client.get_account_positions(account_id)
             
-            self._positions.clear()
+            # PM-R1 fix: Build into a local dict first, then atomic-swap.
+            # This avoids a window where self._positions is empty while
+            # the loop is still running.
+            new_positions = {}
             
             for p in positions_data:
                 symbol = p.get('symbol', '')
@@ -114,9 +120,11 @@ class PositionManager:
                         position.expiration = parsed.get('expiration')
                         position.option_type = parsed.get('option_type')
                 
-                self._positions[symbol] = position
+                new_positions[symbol] = position
             
-            logger.info(f"Synced {len(self._positions)} positions from Questrade")
+            self._positions = new_positions
+            
+            logger.info(f"Synced {len(self._positions)} positions")
             return list(self._positions.values())
             
         except Exception as e:
@@ -163,7 +171,7 @@ class PositionManager:
             return list(self._positions.values())
         
         try:
-            quotes = self.client.get_quotes(symbol_ids)
+            quotes = self.quote_client.get_quotes(symbol_ids)
             
             # Map by symbol ID
             quote_map = {q.get('symbolId'): q for q in quotes}
@@ -209,7 +217,7 @@ class PositionManager:
             try:
                 # Get option quote with Greeks
                 if pos.symbol_id:
-                    option_quotes = self.client.get_option_quotes(option_ids=[pos.symbol_id])
+                    option_quotes = self.quote_client.get_option_quotes(option_ids=[pos.symbol_id])
                     
                     if option_quotes:
                         q = option_quotes[0]
@@ -310,7 +318,7 @@ class PositionManager:
         risk_amount = account_value * (risk_percent / 100)
         
         # Get current price
-        quote = self.client.get_quote_by_symbol(symbol)
+        quote = self.quote_client.get_quote_by_symbol(symbol)
         if not quote:
             return 1
         
@@ -333,36 +341,42 @@ class PositionManager:
     
     def _is_option_symbol(self, symbol: str) -> bool:
         """Check if symbol is an option"""
-        # Questrade option format: AAPL30Jan26C240.00
         import re
-        pattern = r'^[A-Z]+\d{2}[A-Za-z]{3}\d{2}[CP]\d+\.?\d*$'
-        return bool(re.match(pattern, symbol))
+        # Questrade format: AAPL30Jan26C240.00
+        if re.match(r'^[A-Z]+\d{2}[A-Za-z]{3}\d{2}[CP]\d+\.?\d*$', symbol):
+            return True
+        # OCC format: SPY20260310C680
+        if re.match(r'^[A-Z]+\d{8}[CP]\d+\.?\d*$', symbol):
+            return True
+        return False
     
     def _parse_option_symbol(self, symbol: str) -> Optional[Dict]:
-        """Parse Questrade option symbol format"""
+        """Parse option symbol (Questrade or OCC format)"""
         import re
-        # Format: AAPL30Jan26C240.00
-        pattern = r'^([A-Z]+)(\d{2})([A-Za-z]{3})(\d{2})([CP])(\d+\.?\d*)$'
-        match = re.match(pattern, symbol)
-        
-        if not match:
-            return None
-        
-        underlying, day, month, year, opt_type, strike = match.groups()
-        
-        # Convert month name to number
-        months = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
-                  'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
-        
-        month_num = months.get(month, '01')
-        expiration = f"20{year}-{month_num}-{day}"
-        
-        return {
-            "underlying": underlying,
-            "expiration": expiration,
-            "option_type": "call" if opt_type == 'C' else "put",
-            "strike": float(strike)
-        }
+        # OCC format: SPY20260310C680
+        occ_match = re.match(r'^([A-Z]+)(\d{4})(\d{2})(\d{2})([CP])(\d+\.?\d*)$', symbol)
+        if occ_match:
+            underlying, year, month, day, opt_type, strike = occ_match.groups()
+            return {
+                "underlying": underlying,
+                "expiration": f"{year}-{month}-{day}",
+                "option_type": "call" if opt_type == 'C' else "put",
+                "strike": float(strike)
+            }
+        # Questrade format: AAPL30Jan26C240.00
+        qt_match = re.match(r'^([A-Z]+)(\d{2})([A-Za-z]{3})(\d{2})([CP])(\d+\.?\d*)$', symbol)
+        if qt_match:
+            underlying, day, month, year, opt_type, strike = qt_match.groups()
+            months = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
+                      'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
+            month_num = months.get(month, '01')
+            return {
+                "underlying": underlying,
+                "expiration": f"20{year}-{month_num}-{day}",
+                "option_type": "call" if opt_type == 'C' else "put",
+                "strike": float(strike)
+            }
+        return None
     
     def print_positions(self):
         """Print positions summary"""

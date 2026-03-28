@@ -1,0 +1,71 @@
+###############################################################################
+# Docker Compose — IB Gateway + Trading App
+#
+# Usage:
+#   docker compose up -d          # Start both services
+#   docker compose logs -f app    # Follow trading logs
+#   docker compose down           # Stop everything
+#
+# IB Gateway web UI (for login/2FA): http://localhost:6080
+# Dashboard: http://localhost:8050
+###############################################################################
+
+services:
+  # ── IB Gateway (headless, with IBC auto-login) ────────────────────────────
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TWS_SETTINGS_PATH: /opt/ibc/twsSettings
+      TWS_ACCEPT_INCOMING: "yes"
+      READ_ONLY_API: "no"
+      EXISTING_SESSION_DETECTED_ACTION: "primary"
+      # VNC for remote GUI access (login/2FA)
+      VNC_SERVER_PASSWORD: ${VNC_PASSWORD:-changeme}
+    ports:
+      - "4004:4004"   # Paper API via socat (bypasses TrustedIPs)
+      - "6060:5900"   # VNC GUI (x11vnc) — connect with any VNC client
+    volumes:
+      - tws-settings:/opt/ibc/twsSettings
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/localhost/4004"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  # ── Trading Application ───────────────────────────────────────────────────
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    depends_on:
+      ib-gateway:
+        condition: service_healthy
+    environment:
+      # Docker-specific overrides (all other vars come from env_file)
+      IBKR_HOST: ib-gateway
+      IBKR_PAPER_PORT: "4004"
+      IBKR_LIVE_PORT: "4001"
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TZ: America/New_York
+    ports:
+      - "8040:8050"   # Dashboard (host 8040 -> container 8050, avoids Hyper-V excluded range)
+    volumes:
+      - app-data:/app/data
+      - app-logs:/app/logs
+      - questrade-tokens:/app/tokens   # Persist Questrade token across restarts
+
+volumes:
+  app-data:
+  app-logs:
+  questrade-tokens:
+  tws-settings:

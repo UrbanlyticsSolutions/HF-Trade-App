@@ -18,7 +18,7 @@ class CachedDataFetcher:
     - Stores new data in DB for future use
     """
     
-    def __init__(self, db_path: str = "market_data.db"):
+    def __init__(self, db_path: str = "data/market_data.db"):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row

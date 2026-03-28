@@ -39,7 +39,7 @@ class RiskConfig:
     
     # Daily risk controls
     max_trades_per_day: int = 999     # No limit on trades per day
-    stop_after_first_loss: bool = False  # Disabled - allow all trades
+    max_daily_losses: int = 2         # Stop after N losses per day (999=disabled)
     max_daily_loss_pct: float = 0.99    # Effectively disabled
     
     # Portfolio risk
@@ -57,6 +57,31 @@ class RiskConfig:
     # Trade costs
     slippage_pct: float = 0.005      # 0.5% slippage
     commission_per_contract: float = 0.65
+    
+    # ============================================================
+    # GAINGUARD: Position sizing protection system
+    # Counters: ramp-and-crash, overexposure, uncapped daily risk
+    # ============================================================
+    use_gain_guard: bool = False
+    
+    # 1. Daily exposure cap: max cumulative $ exposure per day (as % of capital)
+    max_daily_exposure_pct: float = 0.30      # Max 30% of capital exposed per day
+    
+    # 2. Gain velocity dampener: slow position growth after rapid gains
+    gain_velocity_lookback: int = 3           # Look back N trading days
+    gain_velocity_threshold_pct: float = 0.05 # If gained >5% in lookback, dampen
+    gain_velocity_dampener: float = 0.50      # Reduce position size by 50%
+    
+    # 3. Intraday profit protection: reduce size after accumulating intraday gains
+    intraday_profit_lock_pct: float = 0.02    # After gaining 2% of capital intraday, reduce
+    intraday_profit_dampener: float = 0.50    # Reduce position by 50% to protect gains
+    
+    # 4. Contract ramp limiter: cap day-over-day growth
+    max_contract_growth_factor: float = 2.0   # Max 2x contracts vs previous day peak
+    
+    # 5. Rolling peak drawdown shield: progressive reduction near HWM
+    peak_shield_threshold_pct: float = 0.03   # Start reducing at 3% from peak
+    peak_shield_max_reduction: float = 0.50   # Max 50% reduction at deep drawdown
 
 
 # ============================================================
@@ -271,7 +296,7 @@ class RiskManager:
         # Daily tracking
         self.daily_trades: Dict[str, int] = {}
         self.daily_pnl: Dict[str, float] = {}
-        self.daily_had_loss: Dict[str, bool] = {}
+        self.daily_losses: Dict[str, int] = {}
         
         # Portfolio tracking
         self.max_drawdown = 0.0
@@ -281,6 +306,12 @@ class RiskManager:
         self.consecutive_losses = 0
         self.consecutive_wins = 0  # Track wins to reset streak
         self.in_reduced_mode = False  # Stay in reduced mode until enough wins
+        
+        # GainGuard tracking
+        self.daily_exposure: Dict[str, float] = {}     # date -> cumulative $ exposure
+        self.daily_contracts_peak: Dict[str, int] = {}  # date -> max contracts used
+        self.recent_daily_pnl: list = []                # rolling window of daily P&L
+        self._prev_day_max_contracts: int = 0           # previous day's max contracts
     
     def setup_kelly(self, training_data: pd.DataFrame) -> Tuple[float, dict]:
         """
@@ -321,15 +352,15 @@ class RiskManager:
         if date not in self.daily_trades:
             self.daily_trades[date] = 0
             self.daily_pnl[date] = 0.0
-            self.daily_had_loss[date] = False
+            self.daily_losses[date] = 0
         
         # Check daily trade limit
         if self.daily_trades[date] >= self.config.max_trades_per_day:
             return False, f"Max trades {self.config.max_trades_per_day} reached"
         
-        # Check stop after first loss
-        if self.config.stop_after_first_loss and self.daily_had_loss.get(date, False):
-            return False, "Stopped after first loss"
+        # Check daily loss count limit
+        if self.daily_losses.get(date, 0) >= self.config.max_daily_losses:
+            return False, f"Daily losses {self.daily_losses[date]} >= {self.config.max_daily_losses}"
         
         # Check daily loss limit
         daily_loss_pct = abs(self.daily_pnl.get(date, 0)) / self.capital
@@ -339,7 +370,7 @@ class RiskManager:
         return True, "OK"
     
     def get_position_size(self, option_price: float, ml_confidence: float = None,
-                          stop_loss_pct: float = 0.28) -> Tuple[int, float]:
+                          stop_loss_pct: float = 0.28, date: str = None) -> Tuple[int, float]:
         """
         Get position size for a trade.
         Uses KELLY-BASED sizing with RISK CAPS for protection.
@@ -348,6 +379,7 @@ class RiskManager:
             option_price: Option price per share
             ml_confidence: ML confidence (0-1)
             stop_loss_pct: Stop loss percentage (for risk calculation)
+            date: Current trade date (for GainGuard tracking)
             
         Returns:
             Tuple of (num_contracts, position_value)
@@ -417,6 +449,12 @@ class RiskManager:
         
         num_contracts = min(num_contracts, self.config.max_contracts)
         
+        # ============================================================
+        # GAINGUARD: Apply all protection layers
+        # ============================================================
+        if self.config.use_gain_guard:
+            num_contracts = self._apply_gain_guard(num_contracts, contract_cost, date=date)
+        
         actual_position = num_contracts * contract_cost
         return num_contracts, actual_position
     
@@ -443,13 +481,13 @@ class RiskManager:
         if date not in self.daily_trades:
             self.daily_trades[date] = 0
             self.daily_pnl[date] = 0.0
-            self.daily_had_loss[date] = False
+            self.daily_losses[date] = 0
         
         self.daily_trades[date] += 1
         self.daily_pnl[date] += pnl
         
         if pnl < 0:
-            self.daily_had_loss[date] = True
+            self.daily_losses[date] += 1
             self.consecutive_losses += 1
             self.consecutive_wins = 0
             # Enter reduced mode after max consecutive losses

@@ -7,3 +7,4 @@ httpx>=0.25.0
 supabase>=2.0.0
 dash>=2.14.0
 plotly>=5.18.0
+

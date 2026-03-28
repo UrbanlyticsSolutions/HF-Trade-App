@@ -2,7 +2,7 @@
 Order Manager - Handle order execution and tracking
 
 Manages:
-- Order submission to Questrade
+- Order submission to broker (IBKR or Questrade)
 - Order status monitoring
 - Order cancellation
 - Fill tracking
@@ -75,20 +75,21 @@ class OrderManager:
     Manages order submission, tracking, and execution.
     """
     
-    def __init__(self, questrade_client, trade_db=None):
+    def __init__(self, broker_client, trade_db=None):
         """
         Initialize order manager.
         
         Args:
-            questrade_client: QuestradeClient instance
+            broker_client: Broker client (IBKRAdapter or QuestradeClient)
             trade_db: Optional TradeDatabase for persistence
         """
-        self.client = questrade_client
+        self.client = broker_client
         self.db = trade_db
         self._account_id: Optional[str] = None
         self._orders: Dict[int, Order] = {}  # order_id -> Order
         self._pending_orders: List[Order] = []
         self._fill_callbacks: List[Callable] = []
+        self._reject_callbacks: List[Callable] = []
     
     def set_account(self, account_id: str):
         """Set the account for order operations"""
@@ -98,6 +99,18 @@ class OrderManager:
     def on_fill(self, callback: Callable[[Order], None]):
         """Register callback for fill events"""
         self._fill_callbacks.append(callback)
+    
+    def on_reject(self, callback: Callable[[Order], None]):
+        """Register callback for rejection/cancellation events"""
+        self._reject_callbacks.append(callback)
+    
+    def _notify_reject(self, order: Order):
+        """Notify registered callbacks of an order rejection/cancellation"""
+        for callback in self._reject_callbacks:
+            try:
+                callback(order)
+            except Exception as e:
+                logger.error(f"Reject callback error: {e}")
     
     def _notify_fill(self, order: Order):
         """Notify registered callbacks of a fill"""
@@ -185,15 +198,14 @@ class OrderManager:
                 # Save to database
                 if self.db:
                     self.db.insert_order(
-                        order_id=str(order.order_id),
+                        order_id=order.order_id,
                         trade_id=None,  # Will be linked when filled
                         symbol=symbol,
-                        side=side.value,
+                        account_id=account_id,
+                        action=side.value,
                         order_type=order_type.value,
                         quantity=quantity,
                         limit_price=limit_price,
-                        status=order.status,
-                        submitted_at=order.created_at
                     )
             else:
                 order.status = "Rejected"
@@ -396,10 +408,25 @@ class OrderManager:
                     commission=o.get('commissionCharged', 0)
                 )
                 
-                # Check for fill event
+                # Check for fill event (including PartiallyFilled → Filled)
                 if existing and existing.status != 'Filled' and order.status == 'Filled':
                     logger.info(f"Order filled: {order.order_id} - {order.side} {order.filled_quantity} {order.symbol} @ ${order.avg_fill_price}")
                     self._notify_fill(order)
+                
+                # OE-R5 fix: Detect partial fill completion.
+                # If order transitions to PartiallyFilled and was not previously
+                # PartiallyFilled, log a warning so the operator is aware.
+                if existing and existing.status != 'PartiallyFilled' and order.status == 'PartiallyFilled':
+                    logger.warning(
+                        f"Order partially filled: {order.order_id} - {order.side} "
+                        f"{order.filled_quantity}/{order.quantity} {order.symbol} @ ${order.avg_fill_price}"
+                    )
+                
+                # Check for rejection/cancellation event
+                if existing and existing.status not in ('Cancelled', 'Inactive', 'Canceled', 'ApiCancelled', 'Rejected') \
+                        and order.status in ('Cancelled', 'Inactive', 'Canceled', 'ApiCancelled', 'Rejected'):
+                    logger.warning(f"Order rejected/cancelled: {order.order_id} - {order.side} {order.quantity} {order.symbol} status={order.status}")
+                    self._notify_reject(order)
                 
                 self._orders[order_id] = order
             

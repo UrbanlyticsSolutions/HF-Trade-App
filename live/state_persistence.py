@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
+from config.defaults import initial_capital as _default_capital
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,10 +40,10 @@ class DailyRecord:
 @dataclass
 class TradingState:
     """Persistent trading state"""
-    # Capital tracking
-    initial_capital: float = 10000.0
-    current_capital: float = 10000.0
-    high_water_mark: float = 10000.0
+    # Capital tracking (defaults loaded from config/strategy.json)
+    initial_capital: float = 0.0
+    current_capital: float = 0.0
+    high_water_mark: float = 0.0
     
     # Cumulative stats
     total_trades: int = 0
@@ -115,6 +117,8 @@ class StatePersistence:
             cursor = conn.cursor()
             
             # Get stats from CLOSED trades only (DB is source of truth)
+            # Exclude phantom trades (AUTO-CLOSED at $0.01 with no real fill)
+            # Also exclude neutralized phantoms marked with [PHANTOM] prefix
             cursor.execute("""
                 SELECT 
                     COUNT(*) as total_trades,
@@ -123,6 +127,8 @@ class StatePersistence:
                     COALESCE(SUM(pnl), 0) as total_pnl
                 FROM trades 
                 WHERE status = 'closed' AND pnl IS NOT NULL
+                AND (notes NOT LIKE '%AUTO-CLOSED: no IBKR position, no SELL fill%' OR notes IS NULL)
+                AND (notes NOT LIKE '[PHANTOM]%' OR notes IS NULL)
             """)
             row = cursor.fetchone()
             
@@ -168,11 +174,15 @@ class StatePersistence:
             if self.state.current_capital > self.state.high_water_mark:
                 self.state.high_water_mark = self.state.current_capital
             
-            # Recalculate max drawdown from trade history
+            # Recalculate max drawdown and rebuild equity curve from trade history
+            # Exclude phantom trades (AUTO-CLOSED at $0.01 with no real fill)
+            # Also exclude neutralized phantoms marked with [PHANTOM] prefix
             cursor.execute("""
-                SELECT pnl, exit_time 
+                SELECT id, symbol, pnl, exit_time 
                 FROM trades 
                 WHERE status = 'closed' AND pnl IS NOT NULL 
+                AND (notes NOT LIKE '%AUTO-CLOSED: no IBKR position, no SELL fill%' OR notes IS NULL)
+                AND (notes NOT LIKE '[PHANTOM]%' OR notes IS NULL)
                 ORDER BY exit_time
             """)
             trades = cursor.fetchall()
@@ -182,16 +192,40 @@ class StatePersistence:
                 running_hwm = self.state.initial_capital
                 max_dd = 0.0
                 
-                for pnl, _ in trades:
+                # Rebuild equity curve from DB (DB is source of truth)
+                self.state.equity_curve = [
+                    {"trade_id": 0, "type": "-", "equity": self.state.initial_capital, "pnl": 0}
+                ]
+                
+                for trade_id, symbol, pnl, exit_time in trades:
                     running_capital += pnl
                     if running_capital > running_hwm:
                         running_hwm = running_capital
                     dd = (running_hwm - running_capital) / running_hwm if running_hwm > 0 else 0
                     if dd > max_dd:
                         max_dd = dd
+                    
+                    # Detect option type from symbol
+                    import re
+                    opt_type = ""
+                    if symbol:
+                        m = re.search(r'[CP]\d', str(symbol))
+                        if m:
+                            opt_type = "PUT" if m.group()[0] == 'P' else "CALL"
+                    
+                    self.state.equity_curve.append({
+                        "trade_id": trade_id,
+                        "type": opt_type,
+                        "equity": running_capital,
+                        "pnl": pnl,
+                        "time": exit_time
+                    })
                 
                 self.state.max_drawdown = max_dd
                 self.state.high_water_mark = running_hwm
+            else:
+                # No trades in DB — reset equity curve
+                self.state.equity_curve = []
             
             # Get last trade date
             cursor.execute("""
@@ -238,10 +272,11 @@ class StatePersistence:
                 with open(self.state_file, 'r') as f:
                     data = json.load(f)
                 
+                _cap = _default_capital()
                 self.state = TradingState(
-                    initial_capital=data.get('initial_capital', 10000),
-                    current_capital=data.get('current_capital', 10000),
-                    high_water_mark=data.get('high_water_mark', 10000),
+                    initial_capital=data.get('initial_capital', _cap),
+                    current_capital=data.get('current_capital', _cap),
+                    high_water_mark=data.get('high_water_mark', _cap),
                     total_trades=data.get('total_trades', 0),
                     total_wins=data.get('total_wins', 0),
                     total_losses=data.get('total_losses', 0),
@@ -267,23 +302,43 @@ class StatePersistence:
             logger.info(f"No existing state file, starting fresh")
     
     def save_state(self):
-        """Save current state to file"""
+        """Save current state to file (atomic write: tempfile + rename)"""
         self.state.last_updated = datetime.now().isoformat()
         
         try:
+            import tempfile
             data = asdict(self.state)
-            with open(self.state_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            dir_name = os.path.dirname(os.path.abspath(self.state_file)) or '.'
+            fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
+            try:
+                with os.fdopen(fd, 'w') as tf:
+                    json.dump(data, tf, indent=2)
+                os.replace(tmp_path, self.state_file)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
             logger.debug(f"State saved to {self.state_file}")
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
     
     def set_initial_capital(self, capital: float):
-        """Set initial capital (only if not already set)"""
+        """Update capital from broker. Only resets if this is a fresh state (no trades)."""
         if self.state.total_trades == 0:
+            # Fresh state — set initial capital from broker
             self.state.initial_capital = capital
             self.state.current_capital = capital
             self.state.high_water_mark = capital
+            self.state.equity_curve = []
+            self.save_state()
+            logger.info(f"Initial capital set from broker: ${capital:,.2f}")
+        elif abs(self.state.initial_capital - capital) > 0.01:
+            # Existing trades — update current capital to broker equity
+            # but preserve trade history and initial_capital baseline
+            logger.info(f"Broker equity: ${capital:,.2f} (tracked initial: ${self.state.initial_capital:,.2f})")
+            self.state.current_capital = capital
+            if capital > self.state.high_water_mark:
+                self.state.high_water_mark = capital
             self.save_state()
     
     def record_trade(self, pnl: float, is_win: bool, trade_id: int = None, option_type: str = None):
@@ -431,8 +486,10 @@ class StatePersistence:
         """Get recent daily history"""
         return self.state.daily_records[-days:]
     
-    def reset(self, initial_capital: float = 10000):
+    def reset(self, initial_capital: float = None):
         """Reset all state (use with caution!)"""
+        if initial_capital is None:
+            initial_capital = _default_capital()
         self.state = TradingState(
             initial_capital=initial_capital,
             current_capital=initial_capital,

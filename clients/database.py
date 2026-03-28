@@ -8,7 +8,7 @@ import json
 class MarketDatabase:
     """Database with SQLite persistence for grouped daily data and in-memory cache for other data"""
 
-    def __init__(self, db_path: str = "market_data.db"):
+    def __init__(self, db_path: str = "data/market_data.db"):
         self.db_path = db_path
         # Initialize SQLite connection
         self.conn = sqlite3.connect(db_path)
