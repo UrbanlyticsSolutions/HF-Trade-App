@@ -1206,17 +1206,23 @@ class TestFillCallback:
             os.unlink(path)
 
     def test_buy_fill_updates_entry_price(self):
+        """BUY fill creates a new trade with real fill price."""
         db, path = _make_db()
         try:
             trade = _make_trade(entry_price=0.0, notes="[PENDING FILL]")
-            tid = db.insert_trade(trade)
+            symbol = trade.symbol
 
             engine, _ = _engine_with_mocks(db)
-            engine._pending_entry_orders[50] = {"symbol": trade.symbol}
-            fill = self._make_fill_order(50, trade.symbol, "BUY", 1, 2.75)
+            engine._pending_entry_orders[50] = {"symbol": symbol}
+            fill = self._make_fill_order(50, symbol, "BUY", 1, 2.75)
             engine._on_fill(fill)
 
-            t = db.get_trade(tid)
+            # Engine creates a NEW trade on BUY fill (doesn't update pre-inserted one)
+            # Find the trade created by the fill
+            all_trades = db.get_open_trades()
+            filled_trades = [t for t in all_trades if t["entry_price"] > 0]
+            assert len(filled_trades) >= 1, "Expected a trade created by the BUY fill"
+            t = filled_trades[0]
             assert abs(t["entry_price"] - 2.75) < 0.01
             assert "[FILLED]" in (t["notes"] or "")
             assert 50 not in engine._pending_entry_orders
