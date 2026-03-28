@@ -810,7 +810,11 @@ class _SkipTest(Exception):
 
 def skip_test(reason: str):
     """Skip a test — works with both pytest and standalone runner."""
-    raise _SkipTest(reason)
+    try:
+        import pytest
+        pytest.skip(reason)
+    except ImportError:
+        raise _SkipTest(reason)
 
 
 def run_all():
