@@ -67,38 +67,37 @@ jobs:
       - name: Upload to VM
         run: |
           gcloud compute scp /tmp/trading-app.tar.gz \
-            ib-trading:/home/Kaiqi/trading-app.tar.gz \
+            ib-trading:/tmp/trading-app.tar.gz \
             --zone=${{ secrets.GCP_VM_ZONE }}
 
       - name: Write .env file on VM
         run: |
           # Write env file from secret (avoids committing credentials)
           gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} --command="
-            cat > /home/Kaiqi/trading-app/.env << 'ENVEOF'
+            sudo bash -c 'cat > /home/Kaiqi/trading-app/.env << ENVEOF
           ${{ secrets.VM_ENV_FILE }}
-          ENVEOF
+          ENVEOF'
           "
 
       - name: Deploy on VM
         run: |
           gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} --command="
             set -e
-            cd /home/Kaiqi/trading-app
 
-            # Extract new code
-            tar xzf /home/Kaiqi/trading-app.tar.gz
-            rm /home/Kaiqi/trading-app.tar.gz
+            # Extract new code (use sudo since app dir is owned by Kaiqi)
+            sudo tar xzf /tmp/trading-app.tar.gz -C /home/Kaiqi/trading-app
+            rm -f /tmp/trading-app.tar.gz
 
             # Rebuild and restart only the app container (keep IB Gateway running)
-            cd deploy
-            docker compose build app
-            docker compose up -d app
+            cd /home/Kaiqi/trading-app/deploy
+            sudo docker compose build app
+            sudo docker compose up -d app
 
             echo '=== Deployment complete ==='
-            docker compose ps
+            sudo docker compose ps
             echo ''
             echo '=== Recent app logs ==='
-            docker compose logs --tail=20 app
+            sudo docker compose logs --tail=20 app
           "
 
       - name: Print deployment info
