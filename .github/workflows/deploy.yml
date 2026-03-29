@@ -158,35 +158,72 @@ jobs:
       - name: Build email body
         if: always()
         run: |
-          HEALTH=$(cat /tmp/health.txt 2>/dev/null || echo "Health data not available")
-          CHANGELOG=$(cat /tmp/changelog.txt 2>/dev/null || echo "No changelog")
-          STATUS="${{ job.status }}"
-          if [ "$STATUS" = "success" ]; then
-            COLOR="#2ea44f"; LABEL="Successful"
-          else
-            COLOR="#d73a49"; LABEL="Failed"
-          fi
+          python3 << 'PYEOF'
+          import html, os
 
-          cat > /tmp/email.html << EMAILEOF
-          <h2 style="color: ${COLOR}">Deployment ${LABEL}</h2>
+          def read_file(path, fallback="Not available"):
+              try:
+                  with open(path) as f:
+                      return f.read().strip()
+              except:
+                  return fallback
+
+          health = html.escape(read_file("/tmp/health.txt", "Health data not available"))
+          changelog = html.escape(read_file("/tmp/changelog.txt", "No changelog"))
+
+          status = os.environ.get("DEPLOY_STATUS", "unknown")
+          color = "#2ea44f" if status == "success" else "#d73a49"
+          label = "Successful" if status == "success" else "Failed"
+
+          vm_ip = os.environ.get("VM_IP", "unknown")
+          commit = os.environ.get("COMMIT_SHA", "")
+          repo = os.environ.get("REPO", "")
+          branch = os.environ.get("BRANCH", "")
+          actor = os.environ.get("ACTOR", "")
+          timestamp = os.environ.get("TIMESTAMP", "")
+          run_id = os.environ.get("RUN_ID", "")
+          vm_zone = os.environ.get("VM_ZONE", "")
+          commit_msg = os.environ.get("COMMIT_MSG", "")
+
+          email_html = f"""<h2 style="color: {color}">Deployment {label}</h2>
           <h3>Deployment Info</h3>
           <table style="border-collapse:collapse; font-family:monospace;">
-            <tr><td style="padding:4px 12px;"><b>VM</b></td><td>ib-trading (${{ secrets.GCP_VM_ZONE }})</td></tr>
-            <tr><td style="padding:4px 12px;"><b>IP</b></td><td>${{ steps.health.outputs.vm_ip }}</td></tr>
-            <tr><td style="padding:4px 12px;"><b>Dashboard</b></td><td><a href="http://${{ steps.health.outputs.vm_ip }}:8040">http://${{ steps.health.outputs.vm_ip }}:8040</a></td></tr>
-            <tr><td style="padding:4px 12px;"><b>Commit</b></td><td><a href="https://github.com/${{ github.repository }}/commit/${{ github.sha }}">${{ github.sha }}</a></td></tr>
-            <tr><td style="padding:4px 12px;"><b>Branch</b></td><td>${{ github.ref_name }}</td></tr>
-            <tr><td style="padding:4px 12px;"><b>Triggered by</b></td><td>${{ github.actor }}</td></tr>
-            <tr><td style="padding:4px 12px;"><b>Time (UTC)</b></td><td>${{ github.event.head_commit.timestamp }}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>VM</b></td><td>ib-trading ({vm_zone})</td></tr>
+            <tr><td style="padding:4px 12px;"><b>IP</b></td><td>{vm_ip}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>Dashboard</b></td><td><a href="http://{vm_ip}:8040">http://{vm_ip}:8040</a></td></tr>
+            <tr><td style="padding:4px 12px;"><b>Commit</b></td><td><a href="https://github.com/{repo}/commit/{commit}">{commit[:12]}</a></td></tr>
+            <tr><td style="padding:4px 12px;"><b>Branch</b></td><td>{branch}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>Triggered by</b></td><td>{actor}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>Time (UTC)</b></td><td>{timestamp}</td></tr>
           </table>
-          <h3>Changes</h3>
-          <pre style="background:#f6f8fa; padding:12px; border-radius:6px;">${CHANGELOG}</pre>
-          <h3>System Health</h3>
-          <pre style="background:#f6f8fa; padding:12px; border-radius:6px; font-size:12px;">${HEALTH}</pre>
+          <h3>Commit Message</h3>
+          <pre style="background:#f6f8fa; padding:12px; border-radius:6px;">{html.escape(commit_msg)}</pre>
+          <h3>Recent Changes</h3>
+          <pre style="background:#f6f8fa; padding:12px; border-radius:6px;">{changelog}</pre>
+          <h3>System Health &amp; Trading Stats</h3>
+          <pre style="background:#f6f8fa; padding:12px; border-radius:6px; font-size:12px;">{health}</pre>
           <p style="color:#888; font-size:11px;">
-            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View full run logs</a>
-          </p>
-          EMAILEOF
+            <a href="https://github.com/{repo}/actions/runs/{run_id}">View full run logs</a>
+          </p>"""
+
+          with open("/tmp/email.html", "w") as f:
+              f.write(email_html)
+          # Also write to workspace for the send-mail action
+          with open("email.html", "w") as f:
+              f.write(email_html)
+          print("Email body written")
+          PYEOF
+        env:
+          DEPLOY_STATUS: ${{ job.status }}
+          VM_IP: ${{ steps.health.outputs.vm_ip }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+          RUN_ID: ${{ github.run_id }}
+          VM_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
 
       - name: Send email notification
         if: always()
@@ -200,4 +237,4 @@ jobs:
           subject: "[${{ job.status == 'success' && 'DEPLOYED' || 'FAILED' }}] Trading App - ${{ github.event.head_commit.message }}"
           to: realericzhu@gmail.com
           from: "Trading Deploy Bot <realericzhu@gmail.com>"
-          html_body: file:///tmp/email.html
+          html_body: file://email.html
