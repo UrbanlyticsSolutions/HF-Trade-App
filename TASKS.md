@@ -297,10 +297,11 @@ scripts/
 ## Progress Tracking
 
 ### Completed Tasks
-*None yet*
+- Task 1.1: Fix duplicate table creation in `clients/database.py` ✅
+- Task 2.1: Database Tests Based on IBKR Flex (28/28 tests passing) ✅
 
-### Completed Tasks
-*None yet*
+### In Progress
+*None currently*
 
 ### Blocked Tasks
 *None currently*

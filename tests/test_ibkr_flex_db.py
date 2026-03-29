@@ -388,9 +388,9 @@ class TestTradeSyncWithFlex:
     
     def test_symbol_normalization_questrade_format(self, trade_sync):
         """Test symbol normalization from Questrade format"""
-        # Questrade format: SPY18Mar26P664.00 (format: SPY + YY(18) + Mon(Mar) + DD(26) + P + strike)
+        # Questrade format: SPY18Mar26P664.00 (format: SPY + DD(18) + Mon(Mar) + YY(26) + P + strike)
         normalized = trade_sync._normalize_symbol('SPY18Mar26P664.00')
-        assert normalized == 'SPY20180326P664'
+        assert normalized == 'SPY20260318P664'
     
     def test_time_normalization_ibkr_format(self, trade_sync):
         """Test time normalization from IBKR format"""
