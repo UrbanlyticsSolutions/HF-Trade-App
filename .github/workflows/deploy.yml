@@ -4,6 +4,7 @@
 #   GCP_PROJECT_ID    — stock-479103
 #   GCP_VM_ZONE       — us-east1-b
 #   VM_ENV_FILE       — contents of deploy/.env (IB creds, passwords, etc.)
+#   GMAIL_APP_PASSWORD — Gmail App Password for deployment notifications
 name: Deploy to GCloud
 
 on:
@@ -112,3 +113,87 @@ jobs:
           echo "- **Dashboard**: http://${EXTERNAL_IP}:8040" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Time**: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+
+      - name: Collect system health
+        id: health
+        if: always()
+        run: |
+          # Get VM external IP
+          EXTERNAL_IP=$(gcloud compute instances describe ib-trading \
+            --zone=${{ secrets.GCP_VM_ZONE }} \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          echo "vm_ip=${EXTERNAL_IP}" >> $GITHUB_OUTPUT
+
+          # Collect system status from VM
+          HEALTH=$(gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} --command="
+            echo 'UPTIME:' ; uptime
+            echo '---'
+            echo 'MEMORY:' ; free -h | head -2
+            echo '---'
+            echo 'DISK:' ; df -h / | tail -1
+            echo '---'
+            echo 'CONTAINERS:'
+            cd /home/Kaiqi/trading-app/deploy
+            sudo docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || sudo docker compose ps
+            echo '---'
+            echo 'APP LOGS (last 10):'
+            sudo docker compose logs --tail=10 app 2>&1
+          " 2>&1 || echo "Failed to collect health data")
+
+          # Save to file (multi-line output)
+          echo "$HEALTH" > /tmp/health.txt
+
+      - name: Collect changelog
+        id: changelog
+        if: always()
+        run: |
+          # Get commits in this push
+          CHANGES=$(git log --pretty=format:"• %s (%an, %ar)" -10 2>/dev/null || echo "No changelog available")
+          echo "$CHANGES" > /tmp/changelog.txt
+
+      - name: Build email body
+        if: always()
+        run: |
+          HEALTH=$(cat /tmp/health.txt 2>/dev/null || echo "Health data not available")
+          CHANGELOG=$(cat /tmp/changelog.txt 2>/dev/null || echo "No changelog")
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" = "success" ]; then
+            COLOR="#2ea44f"; LABEL="Successful"
+          else
+            COLOR="#d73a49"; LABEL="Failed"
+          fi
+
+          cat > /tmp/email.html << EMAILEOF
+          <h2 style="color: ${COLOR}">Deployment ${LABEL}</h2>
+          <h3>Deployment Info</h3>
+          <table style="border-collapse:collapse; font-family:monospace;">
+            <tr><td style="padding:4px 12px;"><b>VM</b></td><td>ib-trading (${{ secrets.GCP_VM_ZONE }})</td></tr>
+            <tr><td style="padding:4px 12px;"><b>IP</b></td><td>${{ steps.health.outputs.vm_ip }}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>Dashboard</b></td><td><a href="http://${{ steps.health.outputs.vm_ip }}:8040">http://${{ steps.health.outputs.vm_ip }}:8040</a></td></tr>
+            <tr><td style="padding:4px 12px;"><b>Commit</b></td><td><a href="https://github.com/${{ github.repository }}/commit/${{ github.sha }}">${{ github.sha }}</a></td></tr>
+            <tr><td style="padding:4px 12px;"><b>Branch</b></td><td>${{ github.ref_name }}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>Triggered by</b></td><td>${{ github.actor }}</td></tr>
+            <tr><td style="padding:4px 12px;"><b>Time (UTC)</b></td><td>${{ github.event.head_commit.timestamp }}</td></tr>
+          </table>
+          <h3>Changes</h3>
+          <pre style="background:#f6f8fa; padding:12px; border-radius:6px;">${CHANGELOG}</pre>
+          <h3>System Health</h3>
+          <pre style="background:#f6f8fa; padding:12px; border-radius:6px; font-size:12px;">${HEALTH}</pre>
+          <p style="color:#888; font-size:11px;">
+            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View full run logs</a>
+          </p>
+          EMAILEOF
+
+      - name: Send email notification
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: realericzhu@gmail.com
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "[${{ job.status == 'success' && 'DEPLOYED' || 'FAILED' }}] Trading App - ${{ github.event.head_commit.message }}"
+          to: realericzhu@gmail.com
+          from: "Trading Deploy Bot <realericzhu@gmail.com>"
+          html_body: file:///tmp/email.html
