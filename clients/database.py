@@ -135,25 +135,6 @@ class MarketDatabase:
 
         self.conn.commit()
 
-        # Table for intraday ticker data (1-minute intervals)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS intraday_ticker_data (
-                ticker TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                date TEXT NOT NULL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume INTEGER,
-                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (ticker, timestamp)
-            )
-        ''')
-
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_intraday_date ON intraday_ticker_data(date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_intraday_ticker_date ON intraday_ticker_data(ticker, date)')
-
         # Table for historical option prices (OHLCV)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS option_price_history (

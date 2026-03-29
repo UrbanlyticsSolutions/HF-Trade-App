@@ -98,20 +98,20 @@
 
 #### Task 2.1: Database Tests Based on IBKR Flex
 **File:** `tests/test_ibkr_flex_db.py` (NEW)  
-**Status:** IN PROGRESS  
+**Status:** DONE  
 **Description:** Comprehensive tests for database operations with Flex data
 
 **Test Cases:**
-- [ ] Test Flex XML parsing
-- [ ] Test trade insertion from Flex data
-- [ ] Test duplicate detection (exec_id based)
-- [ ] Test symbol normalization (IBKR vs Questrade formats)
-- [ ] Test time normalization
-- [ ] Test PnL calculation matches Flex
-- [ ] Test commission tracking
-- [ ] Test option contract parsing (calls/puts)
-- [ ] Test expiry/strike extraction
-- [ ] Test realized vs unrealized PnL
+- [x] Test Flex XML parsing
+- [x] Test trade insertion from Flex data
+- [x] Test duplicate detection (exec_id based)
+- [x] Test symbol normalization (IBKR vs Questrade formats)
+- [x] Test time normalization
+- [x] Test PnL calculation matches Flex
+- [x] Test commission tracking
+- [x] Test option contract parsing (calls/puts)
+- [x] Test expiry/strike extraction
+- [x] Test realized vs unrealized PnL
 
 **Acceptance Criteria:**
 - 100% coverage of Flex import path
@@ -122,21 +122,21 @@
 ---
 
 #### Task 2.2: TradeSync Tests
-**File:** `tests/test_trade_sync_comprehensive.py` (NEW)  
-**Status:** PENDING  
+**File:** `tests/test_trade_sync_edge_cases.py`  
+**Status:** DONE  
 **Description:** Comprehensive tests for trade synchronization
 
 **Test Cases:**
-- [ ] Test IBKR session execution sync
-- [ ] Test Flex Web Service sync
-- [ ] Test external DB sync
-- [ ] Test CSV import
-- [ ] Test full sync (all sources)
-- [ ] Test deduplication logic
-- [ ] Test FIFO pairing
-- [ ] Test multi-day trade matching
-- [ ] Test option vs stock handling
-- [ ] Test error handling (missing fields, invalid data)
+- [x] Test IBKR session execution sync
+- [x] Test Flex Web Service sync
+- [x] Test external DB sync
+- [x] Test CSV import
+- [x] Test full sync (all sources)
+- [x] Test deduplication logic
+- [x] Test FIFO pairing
+- [x] Test multi-day trade matching
+- [x] Test option vs stock handling
+- [x] Test error handling (missing fields, invalid data)
 
 **Acceptance Criteria:**
 - 100% coverage of TradeSync methods
@@ -148,20 +148,20 @@
 
 #### Task 2.3: Database Integrity Tests
 **File:** `tests/test_database_integrity.py` (NEW)  
-**Status:** PENDING  
+**Status:** DONE  
 **Description:** Test database schema and constraints
 
 **Test Cases:**
-- [ ] Test table creation
-- [ ] Test index creation
-- [ ] Test foreign key constraints (if any)
-- [ ] Test unique constraints
-- [ ] Test data types
-- [ ] Test nullable columns
-- [ ] Test default values
-- [ ] Test bulk insert performance
-- [ ] Test concurrent access
-- [ ] Test transaction rollback
+- [x] Test table creation
+- [x] Test index creation
+- [x] Test foreign key constraints (if any)
+- [x] Test unique constraints
+- [x] Test data types
+- [x] Test nullable columns
+- [x] Test default values
+- [x] Test bulk insert performance
+- [x] Test concurrent access
+- [x] Test transaction rollback
 
 **Acceptance Criteria:**
 - Schema matches design
@@ -299,6 +299,8 @@ scripts/
 ### Completed Tasks
 - Task 1.1: Fix duplicate table creation in `clients/database.py` ✅
 - Task 2.1: Database Tests Based on IBKR Flex (28/28 tests passing) ✅
+- Task 2.2: TradeSync Tests (19 test classes, 60+ tests in `test_trade_sync_edge_cases.py`) ✅
+- Task 2.3: Database Integrity Tests (83 tests in `test_database_integrity.py`) ✅
 
 ### In Progress
 *None currently*
@@ -370,10 +372,9 @@ scripts/
 
 ## Next Actions
 
-1. **IMMEDIATE:** Fix duplicate table creation in `clients/database.py`
-2. **NEXT:** Implement comprehensive database tests
-3. **THEN:** Consolidate database schemas
-4. **THEN:** Refactor engine.py
+1. **NEXT:** Consolidate database schemas (Task 1.2)
+2. **THEN:** Implement connection pooling (Task 1.3)
+3. **THEN:** Refactor engine.py (Task 3.1)
 
 ---
 

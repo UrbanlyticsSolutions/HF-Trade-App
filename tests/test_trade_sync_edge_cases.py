@@ -1267,7 +1267,8 @@ class TestSyncAll:
         db, path = _make_db()
         try:
             syncer = TradeSync(db)
-            results = syncer.sync_all()
+            with patch.dict(os.environ, {"IBKR_FLEX_TOKEN": "", "IBKR_FLEX_QUERY_ID": ""}):
+                results = syncer.sync_all()
             assert isinstance(results, dict)
             assert results.get("ibkr", 0) == 0
         finally:
