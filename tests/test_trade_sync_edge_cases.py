@@ -1232,7 +1232,7 @@ class TestFillCallback:
             os.unlink(path)
 
     def test_sell_fill_zero_price_logged(self):
-        """Zero fill price should not close the trade normally."""
+        """Zero fill price with no bid fallback should force-close at $0.01."""
         db, path = _make_db()
         try:
             trade = _make_trade(entry_price=2.50)
@@ -1248,8 +1248,9 @@ class TestFillCallback:
             engine._on_fill(fill)
 
             t = db.get_trade(tid)
-            # Trade should remain open because fill price is 0
-            assert t["status"] == "open"
+            # Engine force-closes at $0.01 to prevent permanent open state
+            assert t["status"] == "closed"
+            assert t["exit_price"] == 0.01
         finally:
             db.conn.close()
             os.unlink(path)
