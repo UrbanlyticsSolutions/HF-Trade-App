@@ -124,126 +124,28 @@ jobs:
             --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
           echo "vm_ip=${EXTERNAL_IP}" >> $GITHUB_OUTPUT
 
-          # Collect system status + uptime stats from VM
-          gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} --command="
-            echo '=== VM ==='
-            uptime
-            free -h | head -2
-            df -h / | tail -1
+          # Collect system + trading stats from VM
+          gcloud compute ssh ib-trading --zone=${{ secrets.GCP_VM_ZONE }} -- bash -s << 'HEALTHEOF' > /tmp/health.txt 2>&1 || echo "Failed to collect health" > /tmp/health.txt
+          echo "=== VM ==="
+          uptime
+          free -h | head -2
+          df -h / | tail -1
+          echo ""
 
-            echo '=== CONTAINERS ==='
-            cd /home/Kaiqi/trading-app/deploy
-            sudo docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || sudo docker compose ps
+          echo "=== CONTAINERS ==="
+          cd /home/Kaiqi/trading-app/deploy
+          sudo docker compose ps 2>/dev/null
+          echo ""
 
-            echo '=== ENGINE STATUS ==='
-            # Check engine log freshness
-            TODAY=\$(date +%Y%m%d)
-            LOGFILE=/home/Kaiqi/trading-app/logs/live_0dte_\${TODAY}.log
-            if [ -f \"\$LOGFILE\" ]; then
-              LAST_LINE=\$(tail -1 \"\$LOGFILE\")
-              echo \"Last log: \$LAST_LINE\"
-              ERRORS=\$(grep -c 'ERROR\|CRITICAL' \"\$LOGFILE\" 2>/dev/null || echo 0)
-              echo \"Errors today: \$ERRORS\"
-            else
-              echo 'No engine log today'
-            fi
+          echo "=== TRADING STATS ==="
+          cd /home/Kaiqi/trading-app
+          sudo python3 scripts/deploy_health.py 2>/dev/null || echo "Stats script failed"
+          echo ""
 
-            echo '=== TRADING STATE ==='
-            cat /home/Kaiqi/trading-app/trading_state.json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    s = json.load(sys.stdin)
-    print(f\"Capital: \${s.get(\"current_capital\",0):,.2f}\")
-    print(f\"Total P&L: \${s.get(\"total_pnl\",0):,.2f}\")
-    print(f\"Trades: {s.get(\"total_trades\",0)} (W:{s.get(\"total_wins\",0)} L:{s.get(\"total_losses\",0)})\")
-    t = s.get(\"total_trades\",0)
-    wr = (s.get(\"total_wins\",0)/t*100) if t > 0 else 0
-    print(f\"Win Rate: {wr:.1f}%\")
-    print(f\"Max Drawdown: \${s.get(\"max_drawdown\",0):,.2f}\")
-    print(f\"Engine: {s.get(\"engine_status\",\"unknown\")}\")
-    print(f\"Updated: {s.get(\"last_updated\",\"?\")}\")
-except: print(\"Could not parse state\")
-' 2>/dev/null || echo 'No trading state'
-
-            echo '=== UPTIME: TODAY ==='
-            DB=/home/Kaiqi/trading-app/data/live_0dte_trades.db
-            if [ -f \"\$DB\" ]; then
-              python3 -c \"
-import sqlite3, json
-from datetime import date, timedelta
-conn = sqlite3.connect('\$DB')
-c = conn.cursor()
-today = date.today().strftime('%Y-%m-%d')
-
-# Today
-c.execute('''SELECT COUNT(*),
-  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END),
-  SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END),
-  COALESCE(SUM(pnl), 0),
-  COALESCE(SUM(commission), 0)
-  FROM trades WHERE entry_time LIKE ? AND status='closed' ''', (today+'%',))
-r = c.fetchone()
-trades, wins, losses = r[0] or 0, r[1] or 0, r[2] or 0
-pnl, comm = r[3] or 0, r[4] or 0
-wr = (wins/trades*100) if trades > 0 else 0
-print(f'Trades: {trades} | Wins: {wins} | Losses: {losses} | Win Rate: {wr:.0f}%')
-print(f'Gross P&L: \${pnl:,.2f} | Commissions: \${comm:,.2f} | Net: \${pnl-comm:,.2f}')
-
-# Open positions
-c.execute('SELECT symbol, quantity, entry_price FROM trades WHERE status=\"open\"')
-opens = c.fetchall()
-if opens:
-  print(f'Open positions: {len(opens)}')
-  for o in opens:
-    print(f'  {o[0]} x{o[1]} @ \${o[2]:.2f}')
-else:
-  print('No open positions')
-
-print()
-print('=== UPTIME: PAST 7 DAYS ===')
-for i in range(7):
-  d = (date.today() - timedelta(days=i)).strftime('%Y-%m-%d')
-  c.execute('''SELECT COUNT(*),
-    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END),
-    COALESCE(SUM(pnl), 0),
-    COALESCE(SUM(commission), 0)
-    FROM trades WHERE entry_time LIKE ? AND status='closed' ''', (d+'%',))
-  r = c.fetchone()
-  t, w, p, cm = r[0] or 0, r[1] or 0, r[2] or 0, r[3] or 0
-  if t > 0:
-    wr = w/t*100
-    print(f'{d}: {t} trades, {wr:.0f}% win, P&L \${p-cm:,.2f}')
-  else:
-    # Check if engine ran (log exists)
-    import os
-    logf = f'/home/Kaiqi/trading-app/logs/live_0dte_{d.replace(\"-\",\"\")}.log'
-    if os.path.exists(logf):
-      print(f'{d}: Engine ran, 0 trades')
-    else:
-      day_name = (date.today() - timedelta(days=i)).strftime('%a')
-      print(f'{d}: No activity ({day_name})')
-
-# 7-day totals
-week_ago = (date.today() - timedelta(days=6)).strftime('%Y-%m-%d')
-c.execute('''SELECT COUNT(*),
-  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END),
-  COALESCE(SUM(pnl), 0),
-  COALESCE(SUM(commission), 0)
-  FROM trades WHERE entry_time >= ? AND status='closed' ''', (week_ago,))
-r = c.fetchone()
-t7, w7, p7, c7 = r[0] or 0, r[1] or 0, r[2] or 0, r[3] or 0
-wr7 = (w7/t7*100) if t7 > 0 else 0
-print(f'--- 7-Day Total: {t7} trades, {wr7:.0f}% win, Net P&L \${p7-c7:,.2f} ---')
-conn.close()
-\" 2>/dev/null
-            else
-              echo 'No trade database found'
-            fi
-
-            echo '=== APP LOGS (last 10) ==='
-            cd /home/Kaiqi/trading-app/deploy
-            sudo docker compose logs --tail=10 app 2>&1
-          " 2>&1 > /tmp/health.txt || echo "Failed to collect health data" > /tmp/health.txt
+          echo "=== APP LOGS (last 10) ==="
+          cd /home/Kaiqi/trading-app/deploy
+          sudo docker compose logs --tail=10 app 2>&1
+          HEALTHEOF
 
       - name: Collect changelog
         id: changelog
